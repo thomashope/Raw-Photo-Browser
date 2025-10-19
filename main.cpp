@@ -31,6 +31,14 @@ int displayImage(const std::string& imagePath) {
         return 1;
     }
 
+    // Configure processing parameters for better color accuracy
+    rawProcessor.imgdata.params.use_camera_wb = 1;      // Use camera white balance
+    rawProcessor.imgdata.params.output_color = 1;       // sRGB color space
+    rawProcessor.imgdata.params.gamm[0] = 1.0/2.4;      // sRGB gamma curve
+    rawProcessor.imgdata.params.gamm[1] = 12.92;        // sRGB gamma slope
+    rawProcessor.imgdata.params.user_qual = 3;          // AHD demosaicing (high quality)
+    rawProcessor.imgdata.params.no_auto_bright = 0;     // Enable auto brightness
+
     // Process the image (demosaic, white balance, etc.)
     ret = rawProcessor.dcraw_process();
     if (ret != LIBRAW_SUCCESS) {
@@ -55,12 +63,15 @@ int displayImage(const std::string& imagePath) {
         return 1;
     }
 
-    // Create window
+    // Create resizable window with initial fixed size
+    const int initialWidth = 1280;
+    const int initialHeight = 800;
+
     SDL_Window* window = SDL_CreateWindow(
         imagePath.c_str(),
-        image->width,
-        image->height,
-        0
+        initialWidth,
+        initialHeight,
+        SDL_WINDOW_RESIZABLE
     );
 
     if (!window) {
@@ -101,6 +112,11 @@ int displayImage(const std::string& imagePath) {
     // Upload image data to texture
     SDL_UpdateTexture(texture, nullptr, image->data, image->width * 3);
 
+    // Store image dimensions for aspect ratio calculation
+    const float imageWidth = static_cast<float>(image->width);
+    const float imageHeight = static_cast<float>(image->height);
+    const float imageAspect = imageWidth / imageHeight;
+
     // Free LibRaw memory
     LibRaw::dcraw_clear_mem(image);
 
@@ -119,10 +135,32 @@ int displayImage(const std::string& imagePath) {
             }
         }
 
+        // Get current window size
+        int windowWidth, windowHeight;
+        SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+
+        // Calculate destination rectangle to maintain aspect ratio
+        float windowAspect = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
+        SDL_FRect destRect;
+
+        if (windowAspect > imageAspect) {
+            // Window is wider than image - fit to height
+            destRect.h = static_cast<float>(windowHeight);
+            destRect.w = destRect.h * imageAspect;
+            destRect.x = (windowWidth - destRect.w) / 2.0f;
+            destRect.y = 0.0f;
+        } else {
+            // Window is taller than image - fit to width
+            destRect.w = static_cast<float>(windowWidth);
+            destRect.h = destRect.w / imageAspect;
+            destRect.x = 0.0f;
+            destRect.y = (windowHeight - destRect.h) / 2.0f;
+        }
+
         // Clear and render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        SDL_RenderTexture(renderer, texture, nullptr, nullptr);
+        SDL_RenderTexture(renderer, texture, nullptr, &destRect);
         SDL_RenderPresent(renderer);
     }
 
