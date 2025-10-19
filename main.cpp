@@ -36,9 +36,9 @@ struct GpuTexture {
 
     GpuTexture() : texture(nullptr), originalWidth(0), originalHeight(0), orientation(0) {}
     GpuTexture(SDL_Texture* tex, int width, int height, int orientation = 0) : texture(tex), originalWidth(width), originalHeight(height), orientation(orientation) {}
-    
+
     // Constructor from CpuTexture
-    GpuTexture(SDL_Renderer* renderer, const CpuTexture& cpuTex, int orient = 0) 
+    GpuTexture(SDL_Renderer* renderer, const CpuTexture& cpuTex, int orient = 0)
         : texture(nullptr), originalWidth(0), originalHeight(0), orientation(orient) {
         if (cpuTex.surface) {
             texture = SDL_CreateTextureFromSurface(renderer, cpuTex.surface);
@@ -49,11 +49,18 @@ struct GpuTexture {
         }
     }
 
-    // Delete copy and move operators
+    // Delete copy operators
     GpuTexture(const GpuTexture&) = delete;
     void operator = (const GpuTexture&) = delete;
-    GpuTexture(GpuTexture&&) = delete;
-    void operator = (GpuTexture&&) = delete;
+
+    // GpuTexture(GpuTexture&& other) { *this = std::move(other); };
+    void operator = (GpuTexture&& other) {
+        texture = other.texture;
+        originalWidth = other.originalWidth;
+        originalHeight = other.originalHeight;
+        orientation = other.orientation;
+        other.texture = nullptr;
+    };
 
     ~GpuTexture()
     {
@@ -104,8 +111,24 @@ struct GpuTexture {
     }
 };
 
+struct App
+{
+    std::vector<fs::path> images;
+    size_t currentImageIndex = 0;
+
+    GpuTexture currentRawImage;
+    GpuTexture currentPreviewImage;
+};
+
+namespace
+{
+    App app;
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+}
+
 // Function to display a single raw image
-int displayImage(const std::string& imagePath) {
+int loadImage(const std::string& imagePath, GpuTexture& outPreview, GpuTexture& outRaw) {
     std::error_code ec;
 
     // Initialize LibRaw
@@ -178,41 +201,6 @@ int displayImage(const std::string& imagePath) {
 
     std::cout << "Raw image decoded: " << image->width << "x" << image->height << " (" << image->colors << " colors, " << image->bits << " bits)" << std::endl;
 
-    // Initialize SDL
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
-        LibRaw::dcraw_clear_mem(image);
-        return 1;
-    }
-
-    // Create resizable window with initial fixed size
-    const int initialWidth = 1280;
-    const int initialHeight = 800;
-
-    SDL_Window* window = SDL_CreateWindow(
-        imagePath.c_str(),
-        initialWidth,
-        initialHeight,
-        SDL_WINDOW_RESIZABLE
-    );
-
-    if (!window) {
-        std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
-        SDL_Quit();
-        LibRaw::dcraw_clear_mem(image);
-        return 1;
-    }
-
-    // Create renderer
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
-    if (!renderer) {
-        std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << std::endl;
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        LibRaw::dcraw_clear_mem(image);
-        return 1;
-    }
-
     // Create GpuTexture for raw image data
     GpuTexture rawImage;
     rawImage.texture = SDL_CreateTexture(
@@ -224,10 +212,6 @@ int displayImage(const std::string& imagePath) {
     );
 
     if (!rawImage.texture) {
-        std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
         LibRaw::dcraw_clear_mem(image);
         return 1;
     }
@@ -238,12 +222,158 @@ int displayImage(const std::string& imagePath) {
     // Store raw image info
     rawImage.originalWidth = image->width;
     rawImage.originalHeight = image->height;
+    // rawImage.orientation = orientation;
 
     // Free LibRaw memory
     LibRaw::dcraw_clear_mem(image);
 
-    // Create GpuTexture from JPEG preview if available
-    GpuTexture previewImage(renderer, previewSurface, orientation);
+    // Move to output parameters
+    outPreview = GpuTexture(renderer, previewSurface, orientation);
+    outRaw = std::move(rawImage);
+    return 0;
+}
+
+// Function to check if a file has a raw image extension
+bool isRawFileExtension(const fs::path& filePath) {
+    if (!fs::is_regular_file(filePath)) {
+        return false;
+    }
+
+    std::string ext = filePath.extension().string();
+
+    // Convert to lowercase for case-insensitive comparison
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+
+    // Common raw file extensions
+    static const std::vector<std::string> rawExtensions = {
+        ".nef",  // Nikon
+        ".cr2", ".cr3",  // Canon
+        ".arw", ".srf", ".sr2",  // Sony
+        ".orf",  // Olympus
+        ".rw2",  // Panasonic
+        ".dng",  // Adobe (universal raw)
+        ".raf",  // Fujifilm
+        ".pef",  // Pentax
+        ".3fr",  // Hasselblad
+        ".dcr", ".k25", ".kdc",  // Kodak
+        ".mrw",  // Minolta
+        ".nrw",  // Nikon (newer)
+        ".raw",  // Generic
+        ".rwl",  // Leica
+        ".srw",  // Samsung
+        ".x3f",  // Sigma
+        ".iiq",  // Phase One
+        ".erf",  // Epson
+        ".mef",  // Mamiya
+        ".mos",  // Leaf
+        ".r3d",  // RED
+    };
+
+    return std::find(rawExtensions.begin(), rawExtensions.end(), ext) != rawExtensions.end();
+}
+
+int addImagesInDirectory(const std::string& folderPath) {
+    std::error_code ec;
+
+    // Start timer
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (const auto& entry : fs::recursive_directory_iterator(folderPath, fs::directory_options::skip_permission_denied, ec)) {
+        if (ec) {
+            std::cerr << "Warning: Error accessing some entries: " << ec.message() << std::endl;
+            ec.clear();
+            continue;
+        }
+
+        if(isRawFileExtension(entry.path()))
+            app.images.push_back(entry.path());
+    }
+
+    // Stop timer
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+    if (ec) {
+        std::cerr << "Error during directory iteration: " << ec.message() << std::endl;
+        return 1;
+    }
+
+    std::cout << "Contents of: " << folderPath << std::endl;
+    std::cout << "Found " << app.images.size() << " item(s) recursively in " << duration.count() << " ms" << std::endl;
+
+    return 0;
+}
+
+int main(int argc, char* argv[]) {
+    // Check if path argument is provided
+    if (argc != 2) {
+        std::cerr << "Usage: " << argv[0] << " <path>" << std::endl;
+        std::cerr << "  <path> can be a folder (to browse) or a file (to display)" << std::endl;
+        return 1;
+    }
+
+    std::string path = argv[1];
+
+    // Check if the path exists
+    std::error_code ec;
+
+    if (!fs::exists(path, ec)) {
+        std::cerr << "Error: Path does not exist: " << path << std::endl;
+        if (ec) {
+            std::cerr << "Error code: " << ec.message() << std::endl;
+        }
+        return 1;
+    }
+
+    // Determine if path is a file or directory
+    if (fs::is_directory(path, ec)) {
+        addImagesInDirectory(path);
+    } else if (fs::is_regular_file(path, ec)) {
+        if (isRawFileExtension(path))
+            app.images.push_back(path);
+    } else {
+        std::cerr << "Error: Path is neither a file nor a directory: " << path << std::endl;
+        return 1;
+    }
+
+    if (app.images.empty())
+        return 0;
+
+    // Initialize SDL
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
+        return 1;
+    }
+
+    // Create resizable window with initial fixed size
+    const int initialWidth = 1280;
+    const int initialHeight = 800;
+
+    window = SDL_CreateWindow(
+        "Photo Browser",
+        initialWidth,
+        initialHeight,
+        SDL_WINDOW_RESIZABLE
+    );
+
+    if (!window) {
+        std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
+        SDL_Quit();
+        return 1;
+    }
+
+    // Create renderer
+    renderer = SDL_CreateRenderer(window, nullptr);
+    if (!renderer) {
+        std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << std::endl;
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
+    // Load the first image (now that SDL and renderer are initialized)
+    loadImage(app.images[0].string(), app.currentPreviewImage, app.currentRawImage);
 
     // Main event loop
     bool running = true;
@@ -256,6 +386,7 @@ int displayImage(const std::string& imagePath) {
     std::cout << "  ESC/Q - Quit" << std::endl;
 
     while (running) {
+        bool reloadImage = false;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
                 running = false;
@@ -263,7 +394,7 @@ int displayImage(const std::string& imagePath) {
                 if (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_Q) {
                     running = false;
                 } else if (event.key.key == SDLK_1) {
-                    if (previewImage.texture) {
+                    if (app.currentPreviewImage.texture) {
                         showPreview = true;
                         std::cout << "Switched to JPEG preview" << std::endl;
                     } else {
@@ -272,12 +403,29 @@ int displayImage(const std::string& imagePath) {
                 } else if (event.key.key == SDLK_2) {
                     showPreview = false;
                     std::cout << "Switched to raw image" << std::endl;
+                } else if (event.key.key == SDLK_LEFT) {
+                    if(app.currentImageIndex > 0)
+                    {
+                        app.currentImageIndex--;
+                        reloadImage = true;
+                    }
+                } else if (event.key.key == SDLK_RIGHT) {
+                    if(app.currentImageIndex + 1 < app.images.size())
+                    {
+                        app.currentImageIndex++;
+                        reloadImage = true;
+                    }
                 }
             }
         }
 
+        if(reloadImage)
+        {
+            loadImage(app.images[app.currentImageIndex], app.currentPreviewImage, app.currentRawImage);
+        }
+
         // Select current image
-        const GpuTexture& currentImage = showPreview ? previewImage : rawImage;
+        const GpuTexture& currentImage = showPreview ? app.currentPreviewImage : app.currentRawImage;
 
         // Get display dimensions (accounting for rotation)
         float currentAspect = static_cast<float>(currentImage.getWidth()) /
@@ -318,85 +466,4 @@ int displayImage(const std::string& imagePath) {
     SDL_Quit();
 
     return 0;
-}
-
-// Function to iterate directory and build file list
-int browseDirectory(const std::string& folderPath) {
-    std::error_code ec;
-
-    // Build list of all children recursively
-    std::vector<fs::path> children;
-
-    // Start timer
-    auto start = std::chrono::high_resolution_clock::now();
-
-    for (const auto& entry : fs::recursive_directory_iterator(folderPath, fs::directory_options::skip_permission_denied, ec)) {
-        if (ec) {
-            std::cerr << "Warning: Error accessing some entries: " << ec.message() << std::endl;
-            ec.clear();
-            continue;
-        }
-        children.push_back(entry.path());
-    }
-
-    // Stop timer
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-
-    if (ec) {
-        std::cerr << "Error during directory iteration: " << ec.message() << std::endl;
-        return 1;
-    }
-
-    // Display the results
-    std::cout << "Contents of: " << folderPath << std::endl;
-    std::cout << "Found " << children.size() << " item(s) recursively in " << duration.count() << " ms" << std::endl;
-    std::cout << std::string(80, '-') << std::endl;
-
-#if 0
-    for (const auto& child : children) {
-        std::string type = fs::is_directory(child, ec) ? "[DIR] " : "[FILE]";
-        if (ec) {
-            type = "[???] ";
-            ec.clear();
-        }
-        std::cout << type << " " << child.string() << std::endl;
-    }
-#endif
-
-    return 0;
-}
-
-int main(int argc, char* argv[]) {
-    // Check if path argument is provided
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <path>" << std::endl;
-        std::cerr << "  <path> can be a folder (to browse) or a file (to display)" << std::endl;
-        return 1;
-    }
-
-    std::string path = argv[1];
-
-    // Check if the path exists
-    std::error_code ec;
-
-    if (!fs::exists(path, ec)) {
-        std::cerr << "Error: Path does not exist: " << path << std::endl;
-        if (ec) {
-            std::cerr << "Error code: " << ec.message() << std::endl;
-        }
-        return 1;
-    }
-
-    // Determine if path is a file or directory
-    if (fs::is_directory(path, ec)) {
-        // Browse directory
-        return browseDirectory(path);
-    } else if (fs::is_regular_file(path, ec)) {
-        // Display single image
-        return displayImage(path);
-    } else {
-        std::cerr << "Error: Path is neither a file nor a directory: " << path << std::endl;
-        return 1;
-    }
 }
