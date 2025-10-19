@@ -9,6 +9,66 @@
 
 namespace fs = std::filesystem;
 
+struct GpuTexture {
+    SDL_Texture* texture;
+    int originalWidth;
+    int originalHeight;
+    int orientation; // LibRaw flip value: 0, 3, 5, 6
+
+    GpuTexture() : texture(nullptr), originalWidth(0), originalHeight(0), orientation(0) {}
+
+    GpuTexture(const GpuTexture&) = delete;
+    void operator = (const GpuTexture&) = delete;
+
+    ~GpuTexture()
+    {
+        if(texture)
+            SDL_DestroyTexture(texture);
+    }
+
+    // Get the display dimensions (accounting for 90° rotations)
+    int getWidth() const {
+        return (orientation == 5 || orientation == 6) ? originalHeight : originalWidth;
+    }
+
+    int getHeight() const {
+        return (orientation == 5 || orientation == 6) ? originalWidth : originalHeight;
+    }
+
+    // Get rotation angle in degrees for SDL_RenderTextureRotated
+    double getRotationDegrees() const {
+        switch (orientation) {
+            case 3: return 180.0;
+            case 5: return 270.0; // 90° CCW = 270° CW
+            case 6: return 90.0;
+            default: return 0.0;
+        }
+    }
+
+    // Render the texture with proper orientation
+    void render(SDL_Renderer* renderer, const SDL_FRect* destRect) const {
+        if (!texture) return;
+
+        if (orientation == 0) {
+            // No rotation needed
+            SDL_RenderTexture(renderer, texture, nullptr, destRect);
+        } else if (orientation == 3) {
+            // 180° rotation - dimensions stay the same
+            SDL_RenderTextureRotated(renderer, texture, nullptr, destRect, 180.0, nullptr, SDL_FLIP_NONE);
+        } else {
+            // 90° or 270° rotation - need to swap width/height for the render call
+            // The destRect is sized for the rotated output, but SDL expects pre-rotation dimensions
+            SDL_FRect adjustedRect;
+            adjustedRect.w = destRect->h;  // Swap dimensions
+            adjustedRect.h = destRect->w;
+            adjustedRect.x = destRect->x + (destRect->w - destRect->h) / 2.0f;
+            adjustedRect.y = destRect->y + (destRect->h - destRect->w) / 2.0f;
+
+            SDL_RenderTextureRotated(renderer, texture, nullptr, &adjustedRect, getRotationDegrees(), nullptr, SDL_FLIP_NONE);
+        }
+    }
+};
+
 // Function to display a single raw image
 int displayImage(const std::string& imagePath) {
     std::error_code ec;
@@ -31,6 +91,11 @@ int displayImage(const std::string& imagePath) {
         std::cerr << "Error unpacking raw data: " << libraw_strerror(ret) << std::endl;
         return 1;
     }
+
+    // LibRaw's flip value corresponds to EXIF orientation
+    // 0 = no rotation, 3 = 180°, 5 = 90° CCW + horizontal flip, 6 = 90° CW
+    int orientation = rawProcessor.imgdata.sizes.flip;
+    std::cout << "EXIF orientation (flip value): " << orientation << std::endl;
 
     // Try to extract embedded JPEG preview
     SDL_Surface* previewSurface = nullptr;
@@ -78,8 +143,7 @@ int displayImage(const std::string& imagePath) {
         return 1;
     }
 
-    std::cout << "Raw image decoded: " << image->width << "x" << image->height
-              << " (" << image->colors << " colors, " << image->bits << " bits)" << std::endl;
+    std::cout << "Raw image decoded: " << image->width << "x" << image->height << " (" << image->colors << " colors, " << image->bits << " bits)" << std::endl;
 
     // Initialize SDL
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -119,8 +183,9 @@ int displayImage(const std::string& imagePath) {
         return 1;
     }
 
-    // Create texture from raw image data
-    SDL_Texture* rawTexture = SDL_CreateTexture(
+    // Create GpuTexture for raw image data
+    GpuTexture rawImage;
+    rawImage.texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_RGB24,
         SDL_TEXTUREACCESS_STATIC,
@@ -128,7 +193,7 @@ int displayImage(const std::string& imagePath) {
         image->height
     );
 
-    if (!rawTexture) {
+    if (!rawImage.texture) {
         std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
@@ -139,23 +204,23 @@ int displayImage(const std::string& imagePath) {
     }
 
     // Upload raw image data to texture
-    SDL_UpdateTexture(rawTexture, nullptr, image->data, image->width * 3);
+    SDL_UpdateTexture(rawImage.texture, nullptr, image->data, image->width * 3);
 
-    // Store raw image dimensions for aspect ratio calculation
-    const float rawImageWidth = static_cast<float>(image->width);
-    const float rawImageHeight = static_cast<float>(image->height);
-    const float rawImageAspect = rawImageWidth / rawImageHeight;
+    // Store raw image info
+    rawImage.originalWidth = image->width;
+    rawImage.originalHeight = image->height;
 
     // Free LibRaw memory
     LibRaw::dcraw_clear_mem(image);
 
-    // Create texture from JPEG preview if available
-    SDL_Texture* previewTexture = nullptr;
-    float previewAspect = 1.0f;
+    // Create GpuTexture from JPEG preview if available
+    GpuTexture previewImage;
     if (previewSurface) {
-        previewTexture = SDL_CreateTextureFromSurface(renderer, previewSurface);
-        if (previewTexture) {
-            previewAspect = static_cast<float>(previewSurface->w) / static_cast<float>(previewSurface->h);
+        previewImage.texture = SDL_CreateTextureFromSurface(renderer, previewSurface);
+        if (previewImage.texture) {
+            previewImage.originalWidth = previewSurface->w;
+            previewImage.originalHeight = previewSurface->h;
+            previewImage.orientation = orientation;
         }
         SDL_DestroySurface(previewSurface);
         previewSurface = nullptr;
@@ -179,7 +244,7 @@ int displayImage(const std::string& imagePath) {
                 if (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_Q) {
                     running = false;
                 } else if (event.key.key == SDLK_1) {
-                    if (previewTexture) {
+                    if (previewImage.texture) {
                         showPreview = true;
                         std::cout << "Switched to JPEG preview" << std::endl;
                     } else {
@@ -192,9 +257,12 @@ int displayImage(const std::string& imagePath) {
             }
         }
 
-        // Select current texture and aspect ratio
-        SDL_Texture* currentTexture = showPreview ? previewTexture : rawTexture;
-        float currentAspect = showPreview ? previewAspect : rawImageAspect;
+        // Select current image
+        const GpuTexture& currentImage = showPreview ? previewImage : rawImage;
+
+        // Get display dimensions (accounting for rotation)
+        float currentAspect = static_cast<float>(currentImage.getWidth()) /
+                             static_cast<float>(currentImage.getHeight());
 
         // Get current window size
         int windowWidth, windowHeight;
@@ -221,13 +289,11 @@ int displayImage(const std::string& imagePath) {
         // Clear and render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        SDL_RenderTexture(renderer, currentTexture, nullptr, &destRect);
+        currentImage.render(renderer, &destRect);
         SDL_RenderPresent(renderer);
     }
 
     // Cleanup
-    SDL_DestroyTexture(rawTexture);
-    if (previewTexture) SDL_DestroyTexture(previewTexture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
