@@ -6,6 +6,9 @@
 #include <libraw/libraw.h>
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
+#include "imgui.h"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_sdlrenderer3.h"
 
 namespace fs = std::filesystem;
 
@@ -169,6 +172,22 @@ bool initializeSDL(int width, int height) {
         SDL_Quit();
         return false;
     }
+
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;   // Enable Gamepad Controls
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;      // Enable Docking
+
+    // Setup Dear ImGui style
+    ImGui::StyleColorsDark();
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
+    ImGui_ImplSDLRenderer3_Init(renderer);
+
     return true;
 }
 
@@ -429,11 +448,18 @@ int main(int argc, char* argv[]) {
     std::cout << "\nControls:" << std::endl;
     std::cout << "  1 - Show JPEG preview" << std::endl;
     std::cout << "  2 - Show raw image" << std::endl;
+    std::cout << "  Click filename in list to view image" << std::endl;
     std::cout << "  ESC/Q - Quit" << std::endl;
 
     while (running) {
+        // Start the Dear ImGui frame
+        ImGui_ImplSDLRenderer3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+
         bool reloadImage = false;
         while (SDL_PollEvent(&event)) {
+            ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) {
                 running = false;
             } else if (event.type == SDL_EVENT_KEY_DOWN) {
@@ -449,25 +475,39 @@ int main(int argc, char* argv[]) {
                 } else if (event.key.key == SDLK_2) {
                     showPreview = false;
                     std::cout << "Switched to raw image" << std::endl;
-                } else if (event.key.key == SDLK_LEFT) {
-                    if(app.currentImageIndex > 0)
-                    {
-                        app.currentImageIndex--;
-                        reloadImage = true;
-                    }
-                } else if (event.key.key == SDLK_RIGHT) {
-                    if(app.currentImageIndex + 1 < app.images.size())
-                    {
-                        app.currentImageIndex++;
-                        reloadImage = true;
-                    }
                 }
             }
         }
 
+        // Show ImGui demo window
+        static bool show_demo_window = true;
+        if (show_demo_window)
+            ImGui::ShowDemoWindow(&show_demo_window);
+
+        // Show file list window
+        ImGui::Begin("Image Files");
+        for (size_t i = 0; i < app.images.size(); i++)
+        {
+            // Get just the filename from the full path
+            std::string filename = app.images[i].filename().string();
+
+            // Selectable returns true when clicked
+            bool is_selected = (i == app.currentImageIndex);
+            if (ImGui::Selectable(filename.c_str(), is_selected))
+            {
+                if (app.currentImageIndex != i)
+                {
+                    app.currentImageIndex = i;
+                    reloadImage = true;
+                }
+            }
+        }
+        ImGui::End();
+
+        // Reload image if needed (after processing UI)
         if(reloadImage)
         {
-            loadImage(app.images[app.currentImageIndex], app.currentPreviewImage, app.currentRawImage);
+            loadImage(app.images[app.currentImageIndex].string(), app.currentPreviewImage, app.currentRawImage);
         }
 
         // Select current image
@@ -488,10 +528,19 @@ int main(int argc, char* argv[]) {
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         currentImage.render(renderer, &destRect);
+
+        // Render ImGui
+        ImGui::Render();
+        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+
         SDL_RenderPresent(renderer);
     }
 
     // Cleanup
+    ImGui_ImplSDLRenderer3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
+
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
