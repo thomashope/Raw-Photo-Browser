@@ -9,6 +9,25 @@
 
 namespace fs = std::filesystem;
 
+struct CpuTexture {
+    SDL_Surface* surface;
+
+    CpuTexture() : surface(nullptr) {}
+    explicit CpuTexture(SDL_Surface* surf) : surface(surf) {}
+
+    // Delete copy and move operators
+    CpuTexture(const CpuTexture&) = delete;
+    CpuTexture& operator=(const CpuTexture&) = delete;
+    CpuTexture(CpuTexture&&) = delete;
+    CpuTexture& operator=(CpuTexture&&) = delete;
+
+    ~CpuTexture() {
+        if (surface) {
+            SDL_DestroySurface(surface);
+        }
+    }
+};
+
 struct GpuTexture {
     SDL_Texture* texture;
     int originalWidth;
@@ -16,9 +35,25 @@ struct GpuTexture {
     int orientation; // LibRaw flip value: 0, 3, 5, 6
 
     GpuTexture() : texture(nullptr), originalWidth(0), originalHeight(0), orientation(0) {}
+    GpuTexture(SDL_Texture* tex, int width, int height, int orientation = 0) : texture(tex), originalWidth(width), originalHeight(height), orientation(orientation) {}
+    
+    // Constructor from CpuTexture
+    GpuTexture(SDL_Renderer* renderer, const CpuTexture& cpuTex, int orient = 0) 
+        : texture(nullptr), originalWidth(0), originalHeight(0), orientation(orient) {
+        if (cpuTex.surface) {
+            texture = SDL_CreateTextureFromSurface(renderer, cpuTex.surface);
+            if (texture) {
+                originalWidth = cpuTex.surface->w;
+                originalHeight = cpuTex.surface->h;
+            }
+        }
+    }
 
+    // Delete copy and move operators
     GpuTexture(const GpuTexture&) = delete;
     void operator = (const GpuTexture&) = delete;
+    GpuTexture(GpuTexture&&) = delete;
+    void operator = (GpuTexture&&) = delete;
 
     ~GpuTexture()
     {
@@ -98,7 +133,7 @@ int displayImage(const std::string& imagePath) {
     std::cout << "EXIF orientation (flip value): " << orientation << std::endl;
 
     // Try to extract embedded JPEG preview
-    SDL_Surface* previewSurface = nullptr;
+    CpuTexture previewSurface;
     ret = rawProcessor.unpack_thumb();
     if (ret == LIBRAW_SUCCESS) {
         libraw_processed_image_t* thumb = rawProcessor.dcraw_make_mem_thumb(&ret);
@@ -108,8 +143,8 @@ int displayImage(const std::string& imagePath) {
             // Decode JPEG using SDL_image
             SDL_IOStream* rw = SDL_IOFromConstMem(thumb->data, thumb->data_size);
             if (rw) {
-                previewSurface = IMG_Load_IO(rw, true);
-                if (!previewSurface) {
+                previewSurface.surface = IMG_Load_IO(rw, true);
+                if (!previewSurface.surface) {
                     std::cerr << "Warning: Failed to decode JPEG preview: " << SDL_GetError() << std::endl;
                 }
             }
@@ -131,7 +166,6 @@ int displayImage(const std::string& imagePath) {
     ret = rawProcessor.dcraw_process();
     if (ret != LIBRAW_SUCCESS) {
         std::cerr << "Error processing raw data: " << libraw_strerror(ret) << std::endl;
-        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -139,7 +173,6 @@ int displayImage(const std::string& imagePath) {
     libraw_processed_image_t* image = rawProcessor.dcraw_make_mem_image(&ret);
     if (!image) {
         std::cerr << "Error creating memory image: " << libraw_strerror(ret) << std::endl;
-        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -149,7 +182,6 @@ int displayImage(const std::string& imagePath) {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
         LibRaw::dcraw_clear_mem(image);
-        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -168,7 +200,6 @@ int displayImage(const std::string& imagePath) {
         std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
         SDL_Quit();
         LibRaw::dcraw_clear_mem(image);
-        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -179,7 +210,6 @@ int displayImage(const std::string& imagePath) {
         SDL_DestroyWindow(window);
         SDL_Quit();
         LibRaw::dcraw_clear_mem(image);
-        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -199,7 +229,6 @@ int displayImage(const std::string& imagePath) {
         SDL_DestroyWindow(window);
         SDL_Quit();
         LibRaw::dcraw_clear_mem(image);
-        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -214,17 +243,7 @@ int displayImage(const std::string& imagePath) {
     LibRaw::dcraw_clear_mem(image);
 
     // Create GpuTexture from JPEG preview if available
-    GpuTexture previewImage;
-    if (previewSurface) {
-        previewImage.texture = SDL_CreateTextureFromSurface(renderer, previewSurface);
-        if (previewImage.texture) {
-            previewImage.originalWidth = previewSurface->w;
-            previewImage.originalHeight = previewSurface->h;
-            previewImage.orientation = orientation;
-        }
-        SDL_DestroySurface(previewSurface);
-        previewSurface = nullptr;
-    }
+    GpuTexture previewImage(renderer, previewSurface, orientation);
 
     // Main event loop
     bool running = true;
