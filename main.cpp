@@ -15,11 +15,24 @@ struct CpuTexture {
     CpuTexture() : surface(nullptr) {}
     explicit CpuTexture(SDL_Surface* surf) : surface(surf) {}
 
-    // Delete copy and move operators
+    // Delete copy operators
     CpuTexture(const CpuTexture&) = delete;
     CpuTexture& operator=(const CpuTexture&) = delete;
-    CpuTexture(CpuTexture&&) = delete;
-    CpuTexture& operator=(CpuTexture&&) = delete;
+
+    // Move constructor and assignment
+    CpuTexture(CpuTexture&& other) noexcept : surface(other.surface) {
+        other.surface = nullptr;
+    }
+    CpuTexture& operator=(CpuTexture&& other) noexcept {
+        if (this != &other) {
+            if (surface) {
+                SDL_DestroySurface(surface);
+            }
+            surface = other.surface;
+            other.surface = nullptr;
+        }
+        return *this;
+    }
 
     ~CpuTexture() {
         if (surface) {
@@ -53,13 +66,22 @@ struct GpuTexture {
     GpuTexture(const GpuTexture&) = delete;
     void operator = (const GpuTexture&) = delete;
 
-    // GpuTexture(GpuTexture&& other) { *this = std::move(other); };
-    void operator = (GpuTexture&& other) {
-        texture = other.texture;
-        originalWidth = other.originalWidth;
-        originalHeight = other.originalHeight;
-        orientation = other.orientation;
+    GpuTexture(GpuTexture&& other) noexcept : texture(other.texture), originalWidth(other.originalWidth), originalHeight(other.originalHeight), orientation(other.orientation) {
         other.texture = nullptr;
+    };
+    GpuTexture& operator = (GpuTexture&& other) noexcept {
+        if(this != &other) {
+            if(texture)
+            {
+                SDL_DestroyTexture(texture);
+            }
+            texture = other.texture;
+            originalWidth = other.originalWidth;
+            originalHeight = other.originalHeight;
+            orientation = other.orientation;
+            other.texture = nullptr;
+        }
+        return *this;
     };
 
     ~GpuTexture()
@@ -127,6 +149,75 @@ namespace
     SDL_Renderer* renderer = nullptr;
 }
 
+bool initializeSDL(int width, int height) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
+        return false;
+    }
+
+    window = SDL_CreateWindow("Photo Browser", width, height, SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
+        SDL_Quit();
+        return false;
+    }
+
+    renderer = SDL_CreateRenderer(window, nullptr);
+    if (!renderer) {
+        std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << std::endl;
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return false;
+    }
+    return true;
+}
+
+// Calculate destination rectangle thats fits within window while maintaining aspect ratio
+SDL_FRect calculateFitRect(int windowWidth, int windowHeight, float imageAspect) {
+    float windowAspect = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
+    SDL_FRect destRect;
+
+    if (windowAspect > imageAspect) {
+        // Window is wider than image - fit to height
+        destRect.h = static_cast<float>(windowHeight);
+        destRect.w = destRect.h * imageAspect;
+        destRect.x = (windowWidth - destRect.w) / 2.0f;
+        destRect.y = 0.0f;
+    } else {
+        // Window is taller than image - fit to width
+        destRect.w = static_cast<float>(windowWidth);
+        destRect.h = destRect.w / imageAspect;
+        destRect.x = 0.0f;
+        destRect.y = (windowHeight - destRect.h) / 2.0f;
+    }
+    return destRect;
+}
+
+// Extract JPEG preview from raw file
+CpuTexture loadJpegPreview(LibRaw& rawProcessor) {
+    CpuTexture previewSurface;
+    int ret = rawProcessor.unpack_thumb();
+    if (ret == LIBRAW_SUCCESS) {
+        libraw_processed_image_t* thumb = rawProcessor.dcraw_make_mem_thumb(&ret);
+        if (thumb && thumb->type == LIBRAW_IMAGE_JPEG) {
+            std::cout << "Found JPEG preview: " << thumb->width << "x" << thumb->height << std::endl;
+
+            // Decode JPEG using SDL_image
+            SDL_IOStream* rw = SDL_IOFromConstMem(thumb->data, thumb->data_size);
+            if (rw) {
+                previewSurface.surface = IMG_Load_IO(rw, true);
+                if (!previewSurface.surface) {
+                    std::cerr << "Warning: Failed to decode JPEG preview: " << SDL_GetError() << std::endl;
+                }
+            }
+            LibRaw::dcraw_clear_mem(thumb);
+        } else {
+            std::cout << "No JPEG preview found in raw file" << std::endl;
+        }
+    }
+    return previewSurface;
+}
+
 // Function to display a single raw image
 int loadImage(const std::string& imagePath, GpuTexture& outPreview, GpuTexture& outRaw) {
     std::error_code ec;
@@ -156,26 +247,7 @@ int loadImage(const std::string& imagePath, GpuTexture& outPreview, GpuTexture& 
     std::cout << "EXIF orientation (flip value): " << orientation << std::endl;
 
     // Try to extract embedded JPEG preview
-    CpuTexture previewSurface;
-    ret = rawProcessor.unpack_thumb();
-    if (ret == LIBRAW_SUCCESS) {
-        libraw_processed_image_t* thumb = rawProcessor.dcraw_make_mem_thumb(&ret);
-        if (thumb && thumb->type == LIBRAW_IMAGE_JPEG) {
-            std::cout << "Found JPEG preview: " << thumb->width << "x" << thumb->height << std::endl;
-
-            // Decode JPEG using SDL_image
-            SDL_IOStream* rw = SDL_IOFromConstMem(thumb->data, thumb->data_size);
-            if (rw) {
-                previewSurface.surface = IMG_Load_IO(rw, true);
-                if (!previewSurface.surface) {
-                    std::cerr << "Warning: Failed to decode JPEG preview: " << SDL_GetError() << std::endl;
-                }
-            }
-            LibRaw::dcraw_clear_mem(thumb);
-        } else {
-            std::cout << "No JPEG preview found in raw file" << std::endl;
-        }
-    }
+    CpuTexture previewSurface = loadJpegPreview(rawProcessor);
 
     // Configure processing parameters for better color accuracy
     rawProcessor.imgdata.params.use_camera_wb = 1;      // Use camera white balance
@@ -340,35 +412,9 @@ int main(int argc, char* argv[]) {
     if (app.images.empty())
         return 0;
 
-    // Initialize SDL
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
-        return 1;
-    }
-
-    // Create resizable window with initial fixed size
     const int initialWidth = 1280;
     const int initialHeight = 800;
-
-    window = SDL_CreateWindow(
-        "Photo Browser",
-        initialWidth,
-        initialHeight,
-        SDL_WINDOW_RESIZABLE
-    );
-
-    if (!window) {
-        std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
-        SDL_Quit();
-        return 1;
-    }
-
-    // Create renderer
-    renderer = SDL_CreateRenderer(window, nullptr);
-    if (!renderer) {
-        std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << std::endl;
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+    if (!initializeSDL(initialWidth, initialHeight)) {
         return 1;
     }
 
@@ -436,22 +482,7 @@ int main(int argc, char* argv[]) {
         SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
         // Calculate destination rectangle to maintain aspect ratio
-        float windowAspect = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
-        SDL_FRect destRect;
-
-        if (windowAspect > currentAspect) {
-            // Window is wider than image - fit to height
-            destRect.h = static_cast<float>(windowHeight);
-            destRect.w = destRect.h * currentAspect;
-            destRect.x = (windowWidth - destRect.w) / 2.0f;
-            destRect.y = 0.0f;
-        } else {
-            // Window is taller than image - fit to width
-            destRect.w = static_cast<float>(windowWidth);
-            destRect.h = destRect.w / currentAspect;
-            destRect.x = 0.0f;
-            destRect.y = (windowHeight - destRect.h) / 2.0f;
-        }
+        SDL_FRect destRect = calculateFitRect(windowWidth, windowHeight, currentAspect);
 
         // Clear and render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
