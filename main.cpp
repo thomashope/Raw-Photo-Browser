@@ -5,6 +5,7 @@
 #include <chrono>
 #include <libraw/libraw.h>
 #include <SDL3/SDL.h>
+#include <SDL3_image/SDL_image.h>
 
 namespace fs = std::filesystem;
 
@@ -31,6 +32,28 @@ int displayImage(const std::string& imagePath) {
         return 1;
     }
 
+    // Try to extract embedded JPEG preview
+    SDL_Surface* previewSurface = nullptr;
+    ret = rawProcessor.unpack_thumb();
+    if (ret == LIBRAW_SUCCESS) {
+        libraw_processed_image_t* thumb = rawProcessor.dcraw_make_mem_thumb(&ret);
+        if (thumb && thumb->type == LIBRAW_IMAGE_JPEG) {
+            std::cout << "Found JPEG preview: " << thumb->width << "x" << thumb->height << std::endl;
+
+            // Decode JPEG using SDL_image
+            SDL_IOStream* rw = SDL_IOFromConstMem(thumb->data, thumb->data_size);
+            if (rw) {
+                previewSurface = IMG_Load_IO(rw, true);
+                if (!previewSurface) {
+                    std::cerr << "Warning: Failed to decode JPEG preview: " << SDL_GetError() << std::endl;
+                }
+            }
+            LibRaw::dcraw_clear_mem(thumb);
+        } else {
+            std::cout << "No JPEG preview found in raw file" << std::endl;
+        }
+    }
+
     // Configure processing parameters for better color accuracy
     rawProcessor.imgdata.params.use_camera_wb = 1;      // Use camera white balance
     rawProcessor.imgdata.params.output_color = 1;       // sRGB color space
@@ -43,6 +66,7 @@ int displayImage(const std::string& imagePath) {
     ret = rawProcessor.dcraw_process();
     if (ret != LIBRAW_SUCCESS) {
         std::cerr << "Error processing raw data: " << libraw_strerror(ret) << std::endl;
+        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -50,16 +74,18 @@ int displayImage(const std::string& imagePath) {
     libraw_processed_image_t* image = rawProcessor.dcraw_make_mem_image(&ret);
     if (!image) {
         std::cerr << "Error creating memory image: " << libraw_strerror(ret) << std::endl;
+        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
-    std::cout << "Image decoded: " << image->width << "x" << image->height
+    std::cout << "Raw image decoded: " << image->width << "x" << image->height
               << " (" << image->colors << " colors, " << image->bits << " bits)" << std::endl;
 
     // Initialize SDL
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
         LibRaw::dcraw_clear_mem(image);
+        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -78,6 +104,7 @@ int displayImage(const std::string& imagePath) {
         std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
         SDL_Quit();
         LibRaw::dcraw_clear_mem(image);
+        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
@@ -88,11 +115,12 @@ int displayImage(const std::string& imagePath) {
         SDL_DestroyWindow(window);
         SDL_Quit();
         LibRaw::dcraw_clear_mem(image);
+        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
-    // Create texture from image data
-    SDL_Texture* texture = SDL_CreateTexture(
+    // Create texture from raw image data
+    SDL_Texture* rawTexture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_RGB24,
         SDL_TEXTUREACCESS_STATIC,
@@ -100,29 +128,48 @@ int displayImage(const std::string& imagePath) {
         image->height
     );
 
-    if (!texture) {
+    if (!rawTexture) {
         std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << std::endl;
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         SDL_Quit();
         LibRaw::dcraw_clear_mem(image);
+        if (previewSurface) SDL_DestroySurface(previewSurface);
         return 1;
     }
 
-    // Upload image data to texture
-    SDL_UpdateTexture(texture, nullptr, image->data, image->width * 3);
+    // Upload raw image data to texture
+    SDL_UpdateTexture(rawTexture, nullptr, image->data, image->width * 3);
 
-    // Store image dimensions for aspect ratio calculation
-    const float imageWidth = static_cast<float>(image->width);
-    const float imageHeight = static_cast<float>(image->height);
-    const float imageAspect = imageWidth / imageHeight;
+    // Store raw image dimensions for aspect ratio calculation
+    const float rawImageWidth = static_cast<float>(image->width);
+    const float rawImageHeight = static_cast<float>(image->height);
+    const float rawImageAspect = rawImageWidth / rawImageHeight;
 
     // Free LibRaw memory
     LibRaw::dcraw_clear_mem(image);
 
+    // Create texture from JPEG preview if available
+    SDL_Texture* previewTexture = nullptr;
+    float previewAspect = 1.0f;
+    if (previewSurface) {
+        previewTexture = SDL_CreateTextureFromSurface(renderer, previewSurface);
+        if (previewTexture) {
+            previewAspect = static_cast<float>(previewSurface->w) / static_cast<float>(previewSurface->h);
+        }
+        SDL_DestroySurface(previewSurface);
+        previewSurface = nullptr;
+    }
+
     // Main event loop
     bool running = true;
+    bool showPreview = false;  // Start with raw image (press 1 for preview, 2 for raw)
     SDL_Event event;
+
+    std::cout << "\nControls:" << std::endl;
+    std::cout << "  1 - Show JPEG preview" << std::endl;
+    std::cout << "  2 - Show raw image" << std::endl;
+    std::cout << "  ESC/Q - Quit" << std::endl;
 
     while (running) {
         while (SDL_PollEvent(&event)) {
@@ -131,9 +178,23 @@ int displayImage(const std::string& imagePath) {
             } else if (event.type == SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_Q) {
                     running = false;
+                } else if (event.key.key == SDLK_1) {
+                    if (previewTexture) {
+                        showPreview = true;
+                        std::cout << "Switched to JPEG preview" << std::endl;
+                    } else {
+                        std::cout << "No JPEG preview available" << std::endl;
+                    }
+                } else if (event.key.key == SDLK_2) {
+                    showPreview = false;
+                    std::cout << "Switched to raw image" << std::endl;
                 }
             }
         }
+
+        // Select current texture and aspect ratio
+        SDL_Texture* currentTexture = showPreview ? previewTexture : rawTexture;
+        float currentAspect = showPreview ? previewAspect : rawImageAspect;
 
         // Get current window size
         int windowWidth, windowHeight;
@@ -143,16 +204,16 @@ int displayImage(const std::string& imagePath) {
         float windowAspect = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
         SDL_FRect destRect;
 
-        if (windowAspect > imageAspect) {
+        if (windowAspect > currentAspect) {
             // Window is wider than image - fit to height
             destRect.h = static_cast<float>(windowHeight);
-            destRect.w = destRect.h * imageAspect;
+            destRect.w = destRect.h * currentAspect;
             destRect.x = (windowWidth - destRect.w) / 2.0f;
             destRect.y = 0.0f;
         } else {
             // Window is taller than image - fit to width
             destRect.w = static_cast<float>(windowWidth);
-            destRect.h = destRect.w / imageAspect;
+            destRect.h = destRect.w / currentAspect;
             destRect.x = 0.0f;
             destRect.y = (windowHeight - destRect.h) / 2.0f;
         }
@@ -160,12 +221,13 @@ int displayImage(const std::string& imagePath) {
         // Clear and render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        SDL_RenderTexture(renderer, texture, nullptr, &destRect);
+        SDL_RenderTexture(renderer, currentTexture, nullptr, &destRect);
         SDL_RenderPresent(renderer);
     }
 
     // Cleanup
-    SDL_DestroyTexture(texture);
+    SDL_DestroyTexture(rawTexture);
+    if (previewTexture) SDL_DestroyTexture(previewTexture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
