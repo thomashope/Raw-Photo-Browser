@@ -349,20 +349,69 @@ int main(int argc, char* argv[]) {
 
         // Show file list window
         ImGui::Begin("Image Files");
+        
+        const float thumbnailHeight = 64.0f;  // Fixed thumbnail height
+        const float textHeight = ImGui::GetTextLineHeight();
+        const float itemHeight = thumbnailHeight + textHeight + 4.0f;  // Thumbnail + text + padding
+        
         for (size_t i = 0; i < app.images.size(); i++)
         {
             // Get just the filename from the full path
             std::string filename = app.images[i].filename().string();
 
-            // Selectable returns true when clicked
+            // TODO: Use the preview image for each specific item if available from database
+            // For now, use the current preview image as a placeholder
+            GpuTexture* thumbnail = nullptr;
+            float thumbnailWidth = thumbnailHeight;  // Default to square
+            
+            if (i == app.currentImageIndex) {
+                GpuTexture* currentPreview = app.database->tryGetThumbnail(app.currentImageIndex, app.images[app.currentImageIndex].string());
+                if (currentPreview && currentPreview->texture) {
+                    thumbnail = currentPreview;
+                    // Calculate width based on aspect ratio
+                    float aspect = static_cast<float>(currentPreview->getWidth()) / 
+                                   static_cast<float>(currentPreview->getHeight());
+                    thumbnailWidth = thumbnailHeight * aspect;
+                }
+            }
+            
+            ImGui::PushID(static_cast<int>(i));
+            
+            // Selectable with thumbnail
             bool is_selected = (i == app.currentImageIndex);
-            if (ImGui::Selectable(filename.c_str(), is_selected))
+            
+            // Create a selectable region
+            if (ImGui::Selectable("##select", is_selected, 0, ImVec2(0, itemHeight)))
             {
                 if (app.requestedImageIndex != i)
                 {
                     app.requestedImageIndex = i;
                 }
             }
+            
+            // Draw thumbnail and text on top of the selectable
+            ImVec2 selectableMin = ImGui::GetItemRectMin();
+            
+            if (thumbnail && thumbnail->texture) {
+                ImVec2 thumbnailMin = selectableMin;
+                ImVec2 thumbnailMax = ImVec2(selectableMin.x + thumbnailWidth, selectableMin.y + thumbnailHeight);
+                
+                ImGui::GetWindowDrawList()->AddImage(
+                    (ImTextureID)(intptr_t)thumbnail->texture,
+                    thumbnailMin,
+                    thumbnailMax
+                );
+                
+                // Draw filename below thumbnail
+                ImVec2 textPos = ImVec2(selectableMin.x, selectableMin.y + thumbnailHeight + 2.0f);
+                ImGui::GetWindowDrawList()->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), filename.c_str());
+            } else {
+                // No thumbnail, just draw text
+                ImVec2 textPos = ImVec2(selectableMin.x + 8.0f, selectableMin.y + (itemHeight - textHeight) * 0.5f);
+                ImGui::GetWindowDrawList()->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), filename.c_str());
+            }
+            
+            ImGui::PopID();
         }
         ImGui::End();
 
