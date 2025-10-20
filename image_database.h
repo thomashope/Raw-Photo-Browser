@@ -88,18 +88,31 @@ public:
         stop();
     }
 
-    // Start the worker thread
+    // Start worker threads (one per CPU core)
     void start() {
         running_ = true;
-        workerThread_ = std::thread(&ImageDatabase::workerThreadFunc, this);
+        unsigned int numThreads = std::thread::hardware_concurrency();
+        if (numThreads == 0) {
+            numThreads = 1;  // Fallback if hardware_concurrency fails
+        }
+        
+        workerThreads_.reserve(numThreads);
+        for (unsigned int i = 0; i < numThreads; ++i) {
+            workerThreads_.emplace_back(&ImageDatabase::workerThreadFunc, this);
+        }
+        
+        std::cout << "Started " << numThreads << " worker threads for image loading" << std::endl;
     }
 
-    // Stop the worker thread
+    // Stop all worker threads
     void stop() {
         running_ = false;
-        if (workerThread_.joinable()) {
-            workerThread_.join();
+        for (auto& thread : workerThreads_) {
+            if (thread.joinable()) {
+                thread.join();
+            }
         }
+        workerThreads_.clear();
     }
 
     // Try to get thumbnail for an image
@@ -178,7 +191,7 @@ private:
     std::unordered_map<size_t, ImageEntry> entries_;
     ConcurrentQueue<LoadTask> taskQueue_;
     ConcurrentQueue<LoadResult> resultsQueue_;
-    std::thread workerThread_;
+    std::vector<std::thread> workerThreads_;
     std::atomic<bool> running_;
 
     // Worker thread function
