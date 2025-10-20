@@ -16,8 +16,8 @@ SRC = main.cpp \
 
 # Library flags for homebrew installations
 LDFLAGS = -L/opt/homebrew/lib
-INCLUDES = -I/opt/homebrew/include -Ithird_party/imgui -Ithird_party/imgui/backends
-LIBS = -lraw -lSDL3 -lSDL3_image
+INCLUDES = -I/opt/homebrew/include -Ithird_party/imgui -Ithird_party/imgui/backends -Ithird_party/stb
+LIBS = -lraw -lSDL3
 
 # Default target (debug build)
 $(TARGET): $(SRC)

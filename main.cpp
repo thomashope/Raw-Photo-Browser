@@ -5,7 +5,11 @@
 #include <chrono>
 #include <libraw/libraw.h>
 #include <SDL3/SDL.h>
-#include <SDL3_image/SDL_image.h>
+
+#define STBI_NO_FAILURE_STRINGS  // Thread-safe: disables global error string
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
@@ -13,33 +17,47 @@
 namespace fs = std::filesystem;
 
 struct CpuTexture {
-    SDL_Surface* surface;
+    unsigned char* pixels;
+    int width;
+    int height;
+    int channels;
 
-    CpuTexture() : surface(nullptr) {}
-    explicit CpuTexture(SDL_Surface* surf) : surface(surf) {}
+    CpuTexture() : pixels(nullptr), width(0), height(0), channels(0) {}
+    CpuTexture(unsigned char* pix, int w, int h, int ch) 
+        : pixels(pix), width(w), height(h), channels(ch) {}
 
     // Delete copy operators
     CpuTexture(const CpuTexture&) = delete;
     CpuTexture& operator=(const CpuTexture&) = delete;
 
     // Move constructor and assignment
-    CpuTexture(CpuTexture&& other) noexcept : surface(other.surface) {
-        other.surface = nullptr;
+    CpuTexture(CpuTexture&& other) noexcept 
+        : pixels(other.pixels), width(other.width), height(other.height), channels(other.channels) {
+        other.pixels = nullptr;
+        other.width = 0;
+        other.height = 0;
+        other.channels = 0;
     }
     CpuTexture& operator=(CpuTexture&& other) noexcept {
         if (this != &other) {
-            if (surface) {
-                SDL_DestroySurface(surface);
+            if (pixels) {
+                stbi_image_free(pixels);
             }
-            surface = other.surface;
-            other.surface = nullptr;
+            pixels = other.pixels;
+            width = other.width;
+            height = other.height;
+            channels = other.channels;
+            other.pixels = nullptr;
+            other.width = 0;
+            other.height = 0;
+            other.channels = 0;
         }
         return *this;
     }
 
     ~CpuTexture() {
-        if (surface) {
-            SDL_DestroySurface(surface);
+        if (pixels) {
+            stbi_image_free(pixels);
         }
     }
 };
@@ -56,11 +74,35 @@ struct GpuTexture {
     // Constructor from CpuTexture
     GpuTexture(SDL_Renderer* renderer, const CpuTexture& cpuTex, int orient = 0)
         : texture(nullptr), originalWidth(0), originalHeight(0), orientation(orient) {
-        if (cpuTex.surface) {
-            texture = SDL_CreateTextureFromSurface(renderer, cpuTex.surface);
+        if (cpuTex.pixels && cpuTex.width > 0 && cpuTex.height > 0) {
+            // Determine pixel format based on number of channels
+            SDL_PixelFormat format;
+            int pitch;
+            if (cpuTex.channels == 3) {
+                format = SDL_PIXELFORMAT_RGB24;
+                pitch = cpuTex.width * 3;
+            } else if (cpuTex.channels == 4) {
+                format = SDL_PIXELFORMAT_RGBA32;
+                pitch = cpuTex.width * 4;
+            } else {
+                std::cerr << "Unsupported channel count: " << cpuTex.channels << std::endl;
+                return;
+            }
+
+            // Create texture
+            texture = SDL_CreateTexture(
+                renderer,
+                format,
+                SDL_TEXTUREACCESS_STATIC,
+                cpuTex.width,
+                cpuTex.height
+            );
+
             if (texture) {
-                originalWidth = cpuTex.surface->w;
-                originalHeight = cpuTex.surface->h;
+                // Upload pixel data to GPU
+                SDL_UpdateTexture(texture, nullptr, cpuTex.pixels, pitch);
+                originalWidth = cpuTex.width;
+                originalHeight = cpuTex.height;
             }
         }
     }
@@ -214,27 +256,36 @@ SDL_FRect calculateFitRect(int windowWidth, int windowHeight, float imageAspect)
 
 // Extract JPEG preview from raw file
 CpuTexture loadJpegPreview(LibRaw& rawProcessor) {
-    CpuTexture previewSurface;
+    CpuTexture previewTexture;
     int ret = rawProcessor.unpack_thumb();
     if (ret == LIBRAW_SUCCESS) {
         libraw_processed_image_t* thumb = rawProcessor.dcraw_make_mem_thumb(&ret);
         if (thumb && thumb->type == LIBRAW_IMAGE_JPEG) {
             std::cout << "Found JPEG preview: " << thumb->width << "x" << thumb->height << std::endl;
 
-            // Decode JPEG using SDL_image
-            SDL_IOStream* rw = SDL_IOFromConstMem(thumb->data, thumb->data_size);
-            if (rw) {
-                previewSurface.surface = IMG_Load_IO(rw, true);
-                if (!previewSurface.surface) {
-                    std::cerr << "Warning: Failed to decode JPEG preview: " << SDL_GetError() << std::endl;
-                }
+            // Decode JPEG using stb_image (thread-safe)
+            int width, height, channels;
+            unsigned char* pixels = stbi_load_from_memory(
+                thumb->data, 
+                thumb->data_size, 
+                &width, 
+                &height, 
+                &channels, 
+                3  // Force RGB output (3 channels)
+            );
+            
+            if (pixels) {
+                previewTexture = CpuTexture(pixels, width, height, 3);
+            } else {
+                std::cerr << "Warning: Failed to decode JPEG preview with stb_image" << std::endl;
             }
+            
             LibRaw::dcraw_clear_mem(thumb);
         } else {
             std::cout << "No JPEG preview found in raw file" << std::endl;
         }
     }
-    return previewSurface;
+    return previewTexture;
 }
 
 // Function to display a single raw image
