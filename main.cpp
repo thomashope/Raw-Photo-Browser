@@ -23,7 +23,7 @@ struct CpuTexture {
     int channels;
 
     CpuTexture() : pixels(nullptr), width(0), height(0), channels(0) {}
-    CpuTexture(unsigned char* pix, int w, int h, int ch) 
+    CpuTexture(unsigned char* pix, int w, int h, int ch)
         : pixels(pix), width(w), height(h), channels(ch) {}
 
     // Delete copy operators
@@ -31,7 +31,7 @@ struct CpuTexture {
     CpuTexture& operator=(const CpuTexture&) = delete;
 
     // Move constructor and assignment
-    CpuTexture(CpuTexture&& other) noexcept 
+    CpuTexture(CpuTexture&& other) noexcept
         : pixels(other.pixels), width(other.width), height(other.height), channels(other.channels) {
         other.pixels = nullptr;
         other.width = 0;
@@ -103,6 +103,28 @@ struct GpuTexture {
                 SDL_UpdateTexture(texture, nullptr, cpuTex.pixels, pitch);
                 originalWidth = cpuTex.width;
                 originalHeight = cpuTex.height;
+            }
+        }
+    }
+
+    // Constructor from LibRaw processed image
+    GpuTexture(SDL_Renderer* renderer, libraw_processed_image_t* image, int orient = 0)
+        : texture(nullptr), originalWidth(0), originalHeight(0), orientation(orient) {
+        if (image && image->type == LIBRAW_IMAGE_BITMAP) {
+            // LibRaw bitmap is RGB24 format
+            texture = SDL_CreateTexture(
+                renderer,
+                SDL_PIXELFORMAT_RGB24,
+                SDL_TEXTUREACCESS_STATIC,
+                image->width,
+                image->height
+            );
+
+            if (texture) {
+                // Upload pixel data to GPU
+                SDL_UpdateTexture(texture, nullptr, image->data, image->width * 3);
+                originalWidth = image->width;
+                originalHeight = image->height;
             }
         }
     }
@@ -266,20 +288,20 @@ CpuTexture loadJpegPreview(LibRaw& rawProcessor) {
             // Decode JPEG using stb_image (thread-safe)
             int width, height, channels;
             unsigned char* pixels = stbi_load_from_memory(
-                thumb->data, 
-                thumb->data_size, 
-                &width, 
-                &height, 
-                &channels, 
+                thumb->data,
+                thumb->data_size,
+                &width,
+                &height,
+                &channels,
                 3  // Force RGB output (3 channels)
             );
-            
+
             if (pixels) {
                 previewTexture = CpuTexture(pixels, width, height, 3);
             } else {
                 std::cerr << "Warning: Failed to decode JPEG preview with stb_image" << std::endl;
             }
-            
+
             LibRaw::dcraw_clear_mem(thumb);
         } else {
             std::cout << "No JPEG preview found in raw file" << std::endl;
@@ -343,35 +365,13 @@ int loadImage(const std::string& imagePath, GpuTexture& outPreview, GpuTexture& 
 
     std::cout << "Raw image decoded: " << image->width << "x" << image->height << " (" << image->colors << " colors, " << image->bits << " bits)" << std::endl;
 
-    // Create GpuTexture for raw image data
-    GpuTexture rawImage;
-    rawImage.texture = SDL_CreateTexture(
-        renderer,
-        SDL_PIXELFORMAT_RGB24,
-        SDL_TEXTUREACCESS_STATIC,
-        image->width,
-        image->height
-    );
-
-    if (!rawImage.texture) {
-        LibRaw::dcraw_clear_mem(image);
-        return 1;
-    }
-
-    // Upload raw image data to texture
-    SDL_UpdateTexture(rawImage.texture, nullptr, image->data, image->width * 3);
-
-    // Store raw image info
-    rawImage.originalWidth = image->width;
-    rawImage.originalHeight = image->height;
-    // rawImage.orientation = orientation;
+    // Create GpuTexture for raw and preview images
+    outPreview = GpuTexture(renderer, previewSurface, orientation);
+    outRaw = GpuTexture(renderer, image);
 
     // Free LibRaw memory
     LibRaw::dcraw_clear_mem(image);
 
-    // Move to output parameters
-    outPreview = GpuTexture(renderer, previewSurface, orientation);
-    outRaw = std::move(rawImage);
     return 0;
 }
 
