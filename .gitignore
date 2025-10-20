@@ -2,3 +2,5 @@
 *.dSYM
 photo-browser
 imgui.ini
+build/
+bin/
