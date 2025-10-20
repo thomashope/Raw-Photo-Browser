@@ -6,207 +6,23 @@
 #include <libraw/libraw.h>
 #include <SDL3/SDL.h>
 
-#define STBI_NO_FAILURE_STRINGS  // Thread-safe: disables global error string
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include "texture_types.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
+#include "image_database.h"
 
 namespace fs = std::filesystem;
-
-struct CpuTexture {
-    unsigned char* pixels;
-    int width;
-    int height;
-    int channels;
-
-    CpuTexture() : pixels(nullptr), width(0), height(0), channels(0) {}
-    CpuTexture(unsigned char* pix, int w, int h, int ch)
-        : pixels(pix), width(w), height(h), channels(ch) {}
-
-    // Delete copy operators
-    CpuTexture(const CpuTexture&) = delete;
-    CpuTexture& operator=(const CpuTexture&) = delete;
-
-    // Move constructor and assignment
-    CpuTexture(CpuTexture&& other) noexcept
-        : pixels(other.pixels), width(other.width), height(other.height), channels(other.channels) {
-        other.pixels = nullptr;
-        other.width = 0;
-        other.height = 0;
-        other.channels = 0;
-    }
-    CpuTexture& operator=(CpuTexture&& other) noexcept {
-        if (this != &other) {
-            if (pixels) {
-                stbi_image_free(pixels);
-            }
-            pixels = other.pixels;
-            width = other.width;
-            height = other.height;
-            channels = other.channels;
-            other.pixels = nullptr;
-            other.width = 0;
-            other.height = 0;
-            other.channels = 0;
-        }
-        return *this;
-    }
-
-    ~CpuTexture() {
-        if (pixels) {
-            stbi_image_free(pixels);
-        }
-    }
-};
-
-struct GpuTexture {
-    SDL_Texture* texture;
-    int originalWidth;
-    int originalHeight;
-    int orientation; // LibRaw flip value: 0, 3, 5, 6
-
-    GpuTexture() : texture(nullptr), originalWidth(0), originalHeight(0), orientation(0) {}
-    GpuTexture(SDL_Texture* tex, int width, int height, int orientation = 0) : texture(tex), originalWidth(width), originalHeight(height), orientation(orientation) {}
-
-    // Constructor from CpuTexture
-    GpuTexture(SDL_Renderer* renderer, const CpuTexture& cpuTex, int orient = 0)
-        : texture(nullptr), originalWidth(0), originalHeight(0), orientation(orient) {
-        if (cpuTex.pixels && cpuTex.width > 0 && cpuTex.height > 0) {
-            // Determine pixel format based on number of channels
-            SDL_PixelFormat format;
-            int pitch;
-            if (cpuTex.channels == 3) {
-                format = SDL_PIXELFORMAT_RGB24;
-                pitch = cpuTex.width * 3;
-            } else if (cpuTex.channels == 4) {
-                format = SDL_PIXELFORMAT_RGBA32;
-                pitch = cpuTex.width * 4;
-            } else {
-                std::cerr << "Unsupported channel count: " << cpuTex.channels << std::endl;
-                return;
-            }
-
-            // Create texture
-            texture = SDL_CreateTexture(
-                renderer,
-                format,
-                SDL_TEXTUREACCESS_STATIC,
-                cpuTex.width,
-                cpuTex.height
-            );
-
-            if (texture) {
-                // Upload pixel data to GPU
-                SDL_UpdateTexture(texture, nullptr, cpuTex.pixels, pitch);
-                originalWidth = cpuTex.width;
-                originalHeight = cpuTex.height;
-            }
-        }
-    }
-
-    // Constructor from LibRaw processed image
-    GpuTexture(SDL_Renderer* renderer, libraw_processed_image_t* image, int orient = 0)
-        : texture(nullptr), originalWidth(0), originalHeight(0), orientation(orient) {
-        if (image && image->type == LIBRAW_IMAGE_BITMAP) {
-            // LibRaw bitmap is RGB24 format
-            texture = SDL_CreateTexture(
-                renderer,
-                SDL_PIXELFORMAT_RGB24,
-                SDL_TEXTUREACCESS_STATIC,
-                image->width,
-                image->height
-            );
-
-            if (texture) {
-                // Upload pixel data to GPU
-                SDL_UpdateTexture(texture, nullptr, image->data, image->width * 3);
-                originalWidth = image->width;
-                originalHeight = image->height;
-            }
-        }
-    }
-
-    // Delete copy operators
-    GpuTexture(const GpuTexture&) = delete;
-    void operator = (const GpuTexture&) = delete;
-
-    GpuTexture(GpuTexture&& other) noexcept : texture(other.texture), originalWidth(other.originalWidth), originalHeight(other.originalHeight), orientation(other.orientation) {
-        other.texture = nullptr;
-    };
-    GpuTexture& operator = (GpuTexture&& other) noexcept {
-        if(this != &other) {
-            if(texture)
-            {
-                SDL_DestroyTexture(texture);
-            }
-            texture = other.texture;
-            originalWidth = other.originalWidth;
-            originalHeight = other.originalHeight;
-            orientation = other.orientation;
-            other.texture = nullptr;
-        }
-        return *this;
-    };
-
-    ~GpuTexture()
-    {
-        if(texture)
-            SDL_DestroyTexture(texture);
-    }
-
-    // Get the display dimensions (accounting for 90° rotations)
-    int getWidth() const {
-        return (orientation == 5 || orientation == 6) ? originalHeight : originalWidth;
-    }
-
-    int getHeight() const {
-        return (orientation == 5 || orientation == 6) ? originalWidth : originalHeight;
-    }
-
-    // Get rotation angle in degrees for SDL_RenderTextureRotated
-    double getRotationDegrees() const {
-        switch (orientation) {
-            case 3: return 180.0;
-            case 5: return 270.0; // 90° CCW = 270° CW
-            case 6: return 90.0;
-            default: return 0.0;
-        }
-    }
-
-    // Render the texture with proper orientation
-    void render(SDL_Renderer* renderer, const SDL_FRect* destRect) const {
-        if (!texture) return;
-
-        if (orientation == 0) {
-            // No rotation needed
-            SDL_RenderTexture(renderer, texture, nullptr, destRect);
-        } else if (orientation == 3) {
-            // 180° rotation - dimensions stay the same
-            SDL_RenderTextureRotated(renderer, texture, nullptr, destRect, 180.0, nullptr, SDL_FLIP_NONE);
-        } else {
-            // 90° or 270° rotation - need to swap width/height for the render call
-            // The destRect is sized for the rotated output, but SDL expects pre-rotation dimensions
-            SDL_FRect adjustedRect;
-            adjustedRect.w = destRect->h;  // Swap dimensions
-            adjustedRect.h = destRect->w;
-            adjustedRect.x = destRect->x + (destRect->w - destRect->h) / 2.0f;
-            adjustedRect.y = destRect->y + (destRect->h - destRect->w) / 2.0f;
-
-            SDL_RenderTextureRotated(renderer, texture, nullptr, &adjustedRect, getRotationDegrees(), nullptr, SDL_FLIP_NONE);
-        }
-    }
-};
 
 struct App
 {
     std::vector<fs::path> images;
     size_t currentImageIndex = 0;
-
-    GpuTexture currentRawImage;
-    GpuTexture currentPreviewImage;
+    size_t requestedImageIndex = 0;
+    
+    ImageDatabase* database = nullptr;  // Will be initialized after renderer is created
 };
 
 namespace
@@ -488,8 +304,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Load the first image (now that SDL and renderer are initialized)
-    loadImage(app.images[0].string(), app.currentPreviewImage, app.currentRawImage);
+    // Initialize database and start worker thread
+    app.database = new ImageDatabase(renderer);
+    app.database->start();
 
     // Main event loop
     bool running = true;
@@ -508,7 +325,6 @@ int main(int argc, char* argv[]) {
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        bool reloadImage = false;
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) {
@@ -517,12 +333,8 @@ int main(int argc, char* argv[]) {
                 if (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_Q) {
                     running = false;
                 } else if (event.key.key == SDLK_1) {
-                    if (app.currentPreviewImage.texture) {
-                        showPreview = true;
-                        std::cout << "Switched to JPEG preview" << std::endl;
-                    } else {
-                        std::cout << "No JPEG preview available" << std::endl;
-                    }
+                    showPreview = true;
+                    std::cout << "Switched to JPEG preview" << std::endl;
                 } else if (event.key.key == SDLK_2) {
                     showPreview = false;
                     std::cout << "Switched to raw image" << std::endl;
@@ -546,39 +358,50 @@ int main(int argc, char* argv[]) {
             bool is_selected = (i == app.currentImageIndex);
             if (ImGui::Selectable(filename.c_str(), is_selected))
             {
-                if (app.currentImageIndex != i)
+                if (app.requestedImageIndex != i)
                 {
-                    app.currentImageIndex = i;
-                    reloadImage = true;
+                    app.requestedImageIndex = i;
                 }
             }
         }
         ImGui::End();
 
-        // Reload image if needed (after processing UI)
-        if(reloadImage)
-        {
-            loadImage(app.images[app.currentImageIndex].string(), app.currentPreviewImage, app.currentRawImage);
+        // Update database - processes completed loads on main thread
+        app.database->update();
+        
+        // Try to get requested image from database (this will queue loading if not available)
+        app.database->tryGetThumbnail(app.requestedImageIndex, app.images[app.requestedImageIndex].string());
+        app.database->tryGetRaw(app.requestedImageIndex, app.images[app.requestedImageIndex].string());
+        
+        // Update currentImageIndex only when both preview and raw are loaded
+        if (app.database->isFullyLoaded(app.requestedImageIndex)) {
+            app.currentImageIndex = app.requestedImageIndex;
         }
-
-        // Select current image
-        const GpuTexture& currentImage = showPreview ? app.currentPreviewImage : app.currentRawImage;
-
-        // Get display dimensions (accounting for rotation)
-        float currentAspect = static_cast<float>(currentImage.getWidth()) /
-                             static_cast<float>(currentImage.getHeight());
-
-        // Get current window size
-        int windowWidth, windowHeight;
-        SDL_GetWindowSize(window, &windowWidth, &windowHeight);
-
-        // Calculate destination rectangle to maintain aspect ratio
-        SDL_FRect destRect = calculateFitRect(windowWidth, windowHeight, currentAspect);
-
+        
+        // Get current loaded image to display
+        GpuTexture* currentPreview = app.database->tryGetThumbnail(app.currentImageIndex, app.images[app.currentImageIndex].string());
+        GpuTexture* currentRaw = app.database->tryGetRaw(app.currentImageIndex, app.images[app.currentImageIndex].string());
+        
         // Clear and render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        currentImage.render(renderer, &destRect);
+        
+        // Render the image if available
+        GpuTexture* currentImage = showPreview ? currentPreview : currentRaw;
+        if (currentImage && currentImage->texture) {
+            // Get display dimensions (accounting for rotation)
+            float currentAspect = static_cast<float>(currentImage->getWidth()) /
+                                 static_cast<float>(currentImage->getHeight());
+
+            // Get current window size
+            int windowWidth, windowHeight;
+            SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+
+            // Calculate destination rectangle to maintain aspect ratio
+            SDL_FRect destRect = calculateFitRect(windowWidth, windowHeight, currentAspect);
+
+            currentImage->render(renderer, &destRect);
+        }
 
         // Render ImGui
         ImGui::Render();
@@ -588,6 +411,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Cleanup
+    delete app.database;  // Stops worker thread and frees resources
+    
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
