@@ -16,10 +16,17 @@ namespace fs = std::filesystem;
 // Forward declaration from main.cpp
 CpuTexture loadJpegPreview(LibRaw& rawProcessor);
 
+// Type of load to perform
+enum class LoadType {
+    PreviewOnly,  // Only load JPEG preview/thumbnail
+    Full          // Load both preview and full raw image
+};
+
 // Task to load an image
 struct LoadTask {
     size_t imageIndex;
     std::string imagePath;
+    LoadType loadType;
 };
 
 // Result from loading (either preview or raw)
@@ -76,7 +83,8 @@ struct ImageEntry {
     GpuTexture raw;
     bool previewLoaded = false;
     bool rawLoaded = false;
-    bool loadRequested = false;
+    bool previewRequested = false;  // Preview-only load requested
+    bool loadRequested = false;      // Full load requested
 };
 
 class ImageDatabase {
@@ -116,23 +124,24 @@ public:
     }
 
     // Try to get thumbnail for an image
-    // Returns nullptr if not loaded yet, and queues a load task
+    // Returns nullptr if not loaded yet, and queues a preview-only load task
     GpuTexture* tryGetThumbnail(size_t imageIndex, const std::string& imagePath) {
         auto it = entries_.find(imageIndex);
         if (it != entries_.end() && it->second.previewLoaded) {
             return &it->second.preview;
         }
 
-        // Not loaded, queue a task if not already requested
-        if (it == entries_.end() || !it->second.loadRequested) {
+        // Not loaded, queue a preview-only task if not already requested
+        if (it == entries_.end() || !it->second.previewRequested) {
             if (it == entries_.end()) {
                 entries_[imageIndex] = ImageEntry();
             }
-            entries_[imageIndex].loadRequested = true;
+            entries_[imageIndex].previewRequested = true;
 
             LoadTask task;
             task.imageIndex = imageIndex;
             task.imagePath = imagePath;
+            task.loadType = LoadType::PreviewOnly;
             taskQueue_.push(std::move(task));
         }
 
@@ -140,14 +149,14 @@ public:
     }
 
     // Try to get raw image
-    // Returns nullptr if not loaded yet, and queues a load task if needed
+    // Returns nullptr if not loaded yet, and queues a full load task if needed
     GpuTexture* tryGetRaw(size_t imageIndex, const std::string& imagePath) {
         auto it = entries_.find(imageIndex);
         if (it != entries_.end() && it->second.rawLoaded) {
             return &it->second.raw;
         }
 
-        // Not loaded, queue a task if not already requested
+        // Not loaded, queue a full load task if not already requested
         if (it == entries_.end() || !it->second.loadRequested) {
             if (it == entries_.end()) {
                 entries_[imageIndex] = ImageEntry();
@@ -157,6 +166,7 @@ public:
             LoadTask task;
             task.imageIndex = imageIndex;
             task.imagePath = imagePath;
+            task.loadType = LoadType::Full;
             taskQueue_.push(std::move(task));
         }
 
@@ -167,6 +177,33 @@ public:
     bool isFullyLoaded(size_t imageIndex) {
         auto it = entries_.find(imageIndex);
         return it != entries_.end() && it->second.previewLoaded && it->second.rawLoaded;
+    }
+
+    // Request thumbnails for all images in the collection
+    // This queues preview-only loads for all images
+    void requestAllThumbnails(const std::vector<fs::path>& images) {
+        for (size_t i = 0; i < images.size(); ++i) {
+            // Check if preview already loaded or requested
+            auto it = entries_.find(i);
+            if (it != entries_.end() && (it->second.previewLoaded || it->second.previewRequested)) {
+                continue;  // Already loaded or queued
+            }
+
+            // Create entry if needed
+            if (it == entries_.end()) {
+                entries_[i] = ImageEntry();
+            }
+            entries_[i].previewRequested = true;
+
+            // Queue preview-only task
+            LoadTask task;
+            task.imageIndex = i;
+            task.imagePath = images[i].string();
+            task.loadType = LoadType::PreviewOnly;
+            taskQueue_.push(std::move(task));
+        }
+        
+        std::cout << "Queued thumbnail loads for " << images.size() << " images" << std::endl;
     }
 
     // Update - pull results from queue and create GPU textures
@@ -199,7 +236,19 @@ private:
         while (running_) {
             LoadTask task;
             if (taskQueue_.tryPop(task)) {
-                loadImage(task);
+                // Initialize and open the raw file
+                auto rawProcessor = initializeRawProcessor(task.imagePath);
+                if (!rawProcessor) {
+                    continue;  // Failed to initialize, skip this task
+                }
+                
+                if (task.loadType == LoadType::PreviewOnly) {
+                    loadPreview(task, *rawProcessor);
+                } else {
+                    // Full load: load both preview and raw
+                    loadPreview(task, *rawProcessor);
+                    loadRaw(task, *rawProcessor);
+                }
             } else {
                 // No tasks, sleep briefly to avoid busy-waiting
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -207,68 +256,73 @@ private:
         }
     }
 
-    // Load an image and push results
-    void loadImage(const LoadTask& task) {
+    // Initialize and open a raw file with LibRaw
+    // Returns nullptr on failure
+    std::unique_ptr<LibRaw> initializeRawProcessor(const std::string& imagePath) {
         // Allocate LibRaw on heap to avoid stack overflow
         auto rawProcessor = std::make_unique<LibRaw>();
 
         // Open and decode the raw file
-        int ret = rawProcessor->open_file(task.imagePath.c_str());
+        int ret = rawProcessor->open_file(imagePath.c_str());
         if (ret != LIBRAW_SUCCESS) {
             std::cerr << "Error opening file: " << libraw_strerror(ret) << std::endl;
-            return;
+            return nullptr;
         }
 
         // Unpack the raw data
         ret = rawProcessor->unpack();
         if (ret != LIBRAW_SUCCESS) {
             std::cerr << "Error unpacking raw data: " << libraw_strerror(ret) << std::endl;
-            return;
+            return nullptr;
         }
 
+        return rawProcessor;
+    }
+
+    // Load the preview/thumbnail for an image
+    void loadPreview(const LoadTask& task, LibRaw& rawProcessor) {
         // Get orientation
-        int orientation = rawProcessor->imgdata.sizes.flip;
+        int orientation = rawProcessor.imgdata.sizes.flip;
 
-        // Load and push preview immediately
-        {
-            LoadResult previewResult;
-            previewResult.imageIndex = task.imageIndex;
-            previewResult.type = ImageType::Preview;
-            previewResult.cpuTexture = loadJpegPreview(*rawProcessor);
-            previewResult.orientation = orientation;
-            resultsQueue_.push(std::move(previewResult));
-        }
+        // Load and push preview
+        LoadResult previewResult;
+        previewResult.imageIndex = task.imageIndex;
+        previewResult.type = ImageType::Preview;
+        previewResult.cpuTexture = loadJpegPreview(rawProcessor);
+        previewResult.orientation = orientation;
+        resultsQueue_.push(std::move(previewResult));
+    }
 
+    // Load the full raw image
+    void loadRaw(const LoadTask& task, LibRaw& rawProcessor) {
         // Configure processing parameters for better color accuracy
-        rawProcessor->imgdata.params.use_camera_wb = 1;
-        rawProcessor->imgdata.params.output_color = 1;
-        rawProcessor->imgdata.params.gamm[0] = 1.0/2.4;
-        rawProcessor->imgdata.params.gamm[1] = 12.92;
-        rawProcessor->imgdata.params.user_qual = 3;
-        rawProcessor->imgdata.params.no_auto_bright = 0;
+        rawProcessor.imgdata.params.use_camera_wb = 1;
+        rawProcessor.imgdata.params.output_color = 1;
+        rawProcessor.imgdata.params.gamm[0] = 1.0/2.4;
+        rawProcessor.imgdata.params.gamm[1] = 12.92;
+        rawProcessor.imgdata.params.user_qual = 3;
+        rawProcessor.imgdata.params.no_auto_bright = 0;
 
         // Process the image
-        ret = rawProcessor->dcraw_process();
+        int ret = rawProcessor.dcraw_process();
         if (ret != LIBRAW_SUCCESS) {
             std::cerr << "Error processing raw data: " << libraw_strerror(ret) << std::endl;
             return;
         }
 
         // Get processed image
-        libraw_processed_image_t* image = rawProcessor->dcraw_make_mem_image(&ret);
+        libraw_processed_image_t* image = rawProcessor.dcraw_make_mem_image(&ret);
         if (!image) {
             std::cerr << "Error creating memory image: " << libraw_strerror(ret) << std::endl;
             return;
         }
 
         // Push raw result
-        {
-            LoadResult rawResult;
-            rawResult.imageIndex = task.imageIndex;
-            rawResult.type = ImageType::Raw;
-            rawResult.rawImage = image;  // Transfer ownership
-            // rawResult.orientation = orientation; orientation only applies to the preview image
-            resultsQueue_.push(std::move(rawResult));
-        }
+        LoadResult rawResult;
+        rawResult.imageIndex = task.imageIndex;
+        rawResult.type = ImageType::Raw;
+        rawResult.rawImage = image;  // Transfer ownership
+        rawResult.orientation = 0;  // Orientation is not set for raw images
+        resultsQueue_.push(std::move(rawResult));
     }
 };

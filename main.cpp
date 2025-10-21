@@ -304,9 +304,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Initialize database and start worker thread
+    // Initialize database and start worker threads
     app.database = new ImageDatabase(renderer);
     app.database->start();
+    
+    // Request thumbnails for all images to load in background
+    app.database->requestAllThumbnails(app.images);
 
     // Main event loop
     bool running = true;
@@ -359,20 +362,15 @@ int main(int argc, char* argv[]) {
             // Get just the filename from the full path
             std::string filename = app.images[i].filename().string();
 
-            // TODO: Use the preview image for each specific item if available from database
-            // For now, use the current preview image as a placeholder
-            GpuTexture* thumbnail = nullptr;
+            // Try to get thumbnail for this specific item
+            GpuTexture* thumbnail = app.database->tryGetThumbnail(i, app.images[i].string());
             float thumbnailWidth = thumbnailHeight;  // Default to square
             
-            if (i == app.currentImageIndex) {
-                GpuTexture* currentPreview = app.database->tryGetThumbnail(app.currentImageIndex, app.images[app.currentImageIndex].string());
-                if (currentPreview && currentPreview->texture) {
-                    thumbnail = currentPreview;
-                    // Calculate width based on aspect ratio
-                    float aspect = static_cast<float>(currentPreview->getWidth()) / 
-                                   static_cast<float>(currentPreview->getHeight());
-                    thumbnailWidth = thumbnailHeight * aspect;
-                }
+            if (thumbnail && thumbnail->texture) {
+                // Calculate width based on aspect ratio
+                float aspect = static_cast<float>(thumbnail->getWidth()) / 
+                               static_cast<float>(thumbnail->getHeight());
+                thumbnailWidth = thumbnailHeight * aspect;
             }
             
             ImGui::PushID(static_cast<int>(i));
@@ -418,8 +416,7 @@ int main(int argc, char* argv[]) {
         // Update database - processes completed loads on main thread
         app.database->update();
         
-        // Try to get requested image from database (this will queue loading if not available)
-        app.database->tryGetThumbnail(app.requestedImageIndex, app.images[app.requestedImageIndex].string());
+        // Request full raw image for the selected image only (thumbnails are loaded in background)
         app.database->tryGetRaw(app.requestedImageIndex, app.images[app.requestedImageIndex].string());
         
         // Update currentImageIndex only when both preview and raw are loaded
