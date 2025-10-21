@@ -21,7 +21,7 @@ struct App
     std::vector<fs::path> images;
     size_t currentImageIndex = 0;
     size_t requestedImageIndex = 0;
-    
+
     ImageDatabase* database = nullptr;  // Will be initialized after renderer is created
 };
 
@@ -307,7 +307,7 @@ int main(int argc, char* argv[]) {
     // Initialize database and start worker threads
     app.database = new ImageDatabase(renderer);
     app.database->start();
-    
+
     // Request thumbnails for all images to load in background
     app.database->requestAllThumbnails(app.images);
 
@@ -328,6 +328,8 @@ int main(int argc, char* argv[]) {
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
+        static bool showImGuiDemoWindow = false;
+
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) {
@@ -341,22 +343,34 @@ int main(int argc, char* argv[]) {
                 } else if (event.key.key == SDLK_2) {
                     showPreview = false;
                     std::cout << "Switched to raw image" << std::endl;
+                } else if (event.key.key == SDLK_F12) {
+                    showImGuiDemoWindow = !showImGuiDemoWindow;
                 }
             }
         }
 
-        // Show ImGui demo window
-        static bool show_demo_window = true;
-        if (show_demo_window)
-            ImGui::ShowDemoWindow(&show_demo_window);
+        if (showImGuiDemoWindow)
+            ImGui::ShowDemoWindow(&showImGuiDemoWindow);
 
-        // Show file list window
-        ImGui::Begin("Image Files");
-        
+        // Get window size for sidebar layout
+        int windowWidth, windowHeight;
+        SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+
+        // Setup sidebar window as left panel
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(std::min(windowWidth * 0.2f, 250.0f), 0.0f), ImGuiCond_Once);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, windowHeight), ImVec2(windowWidth * 0.9f, windowHeight));
+        ImGui::Begin("##Sidebar", nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoCollapse);
+
+        float sidebarWidth = ImGui::GetWindowWidth();
+
         const float thumbnailHeight = 64.0f;  // Fixed thumbnail height
         const float textHeight = ImGui::GetTextLineHeight();
         const float itemHeight = thumbnailHeight + textHeight + 4.0f;  // Thumbnail + text + padding
-        
+
         for (size_t i = 0; i < app.images.size(); i++)
         {
             // Get just the filename from the full path
@@ -365,19 +379,19 @@ int main(int argc, char* argv[]) {
             // Try to get thumbnail for this specific item
             GpuTexture* thumbnail = app.database->tryGetThumbnail(i, app.images[i].string());
             float thumbnailWidth = thumbnailHeight;  // Default to square
-            
+
             if (thumbnail && thumbnail->texture) {
                 // Calculate width based on aspect ratio
-                float aspect = static_cast<float>(thumbnail->getWidth()) / 
+                float aspect = static_cast<float>(thumbnail->getWidth()) /
                                static_cast<float>(thumbnail->getHeight());
                 thumbnailWidth = thumbnailHeight * aspect;
             }
-            
+
             ImGui::PushID(static_cast<int>(i));
-            
+
             // Selectable with thumbnail
             bool is_selected = (i == app.currentImageIndex);
-            
+
             // Create a selectable region
             if (ImGui::Selectable("##select", is_selected, 0, ImVec2(0, itemHeight)))
             {
@@ -386,20 +400,20 @@ int main(int argc, char* argv[]) {
                     app.requestedImageIndex = i;
                 }
             }
-            
+
             // Draw thumbnail and text on top of the selectable
             ImVec2 selectableMin = ImGui::GetItemRectMin();
-            
+
             if (thumbnail && thumbnail->texture) {
                 ImVec2 thumbnailMin = selectableMin;
                 ImVec2 thumbnailMax = ImVec2(selectableMin.x + thumbnailWidth, selectableMin.y + thumbnailHeight);
-                
+
                 ImGui::GetWindowDrawList()->AddImage(
                     (ImTextureID)(intptr_t)thumbnail->texture,
                     thumbnailMin,
                     thumbnailMax
                 );
-                
+
                 // Draw filename below thumbnail
                 ImVec2 textPos = ImVec2(selectableMin.x, selectableMin.y + thumbnailHeight + 2.0f);
                 ImGui::GetWindowDrawList()->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), filename.c_str());
@@ -408,30 +422,30 @@ int main(int argc, char* argv[]) {
                 ImVec2 textPos = ImVec2(selectableMin.x + 8.0f, selectableMin.y + (itemHeight - textHeight) * 0.5f);
                 ImGui::GetWindowDrawList()->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), filename.c_str());
             }
-            
+
             ImGui::PopID();
         }
         ImGui::End();
 
         // Update database - processes completed loads on main thread
         app.database->update();
-        
+
         // Request full raw image for the selected image only (thumbnails are loaded in background)
         app.database->tryGetRaw(app.requestedImageIndex, app.images[app.requestedImageIndex].string());
-        
+
         // Update currentImageIndex only when both preview and raw are loaded
         if (app.database->isFullyLoaded(app.requestedImageIndex)) {
             app.currentImageIndex = app.requestedImageIndex;
         }
-        
+
         // Get current loaded image to display
         GpuTexture* currentPreview = app.database->tryGetThumbnail(app.currentImageIndex, app.images[app.currentImageIndex].string());
         GpuTexture* currentRaw = app.database->tryGetRaw(app.currentImageIndex, app.images[app.currentImageIndex].string());
-        
+
         // Clear and render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        
+
         // Render the image if available
         GpuTexture* currentImage = showPreview ? currentPreview : currentRaw;
         if (currentImage && currentImage->texture) {
@@ -439,12 +453,15 @@ int main(int argc, char* argv[]) {
             float currentAspect = static_cast<float>(currentImage->getWidth()) /
                                  static_cast<float>(currentImage->getHeight());
 
-            // Get current window size
-            int windowWidth, windowHeight;
-            SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+            // Calculate available space for image (excluding sidebar)
+            int availableWidth = windowWidth - static_cast<int>(sidebarWidth);
+            int availableHeight = windowHeight;
 
-            // Calculate destination rectangle to maintain aspect ratio
-            SDL_FRect destRect = calculateFitRect(windowWidth, windowHeight, currentAspect);
+            // Calculate destination rectangle to maintain aspect ratio in available space
+            SDL_FRect destRect = calculateFitRect(availableWidth, availableHeight, currentAspect);
+
+            // Offset by sidebar width
+            destRect.x += sidebarWidth;
 
             currentImage->render(renderer, &destRect);
         }
@@ -458,7 +475,7 @@ int main(int argc, char* argv[]) {
 
     // Cleanup
     delete app.database;  // Stops worker thread and frees resources
-    
+
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
