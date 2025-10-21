@@ -19,7 +19,8 @@ CpuTexture loadJpegPreview(LibRaw& rawProcessor);
 // Type of load to perform
 enum class LoadType {
     PreviewOnly,  // Only load JPEG preview/thumbnail
-    Full          // Load both preview and full raw image
+    RawOnly,      // Only load full raw image
+    Both          // Load both preview and full raw image
 };
 
 // Task to load an image
@@ -84,7 +85,7 @@ struct ImageEntry {
     bool previewLoaded = false;
     bool rawLoaded = false;
     bool previewRequested = false;  // Preview-only load requested
-    bool loadRequested = false;      // Full load requested
+    bool rawRequested = false;       // Raw load requested
 };
 
 class ImageDatabase {
@@ -149,24 +150,36 @@ public:
     }
 
     // Try to get raw image
-    // Returns nullptr if not loaded yet, and queues a full load task if needed
+    // Returns nullptr if not loaded yet, and queues a raw load task if needed
     GpuTexture* tryGetRaw(size_t imageIndex, const std::string& imagePath) {
         auto it = entries_.find(imageIndex);
         if (it != entries_.end() && it->second.rawLoaded) {
             return &it->second.raw;
         }
 
-        // Not loaded, queue a full load task if not already requested
-        if (it == entries_.end() || !it->second.loadRequested) {
+        // Not loaded, queue a load task if not already requested
+        if (it == entries_.end() || !it->second.rawRequested) {
             if (it == entries_.end()) {
                 entries_[imageIndex] = ImageEntry();
+                it = entries_.find(imageIndex);
             }
-            entries_[imageIndex].loadRequested = true;
+            
+            ImageEntry& entry = it->second;
+            entry.rawRequested = true;
+
+            // Determine load type based on whether preview is already loaded/requested
+            LoadType loadType;
+            if (entry.previewLoaded || entry.previewRequested) {
+                loadType = LoadType::RawOnly;
+            } else {
+                loadType = LoadType::Both;
+                entry.previewRequested = true;  // Mark preview as requested too
+            }
 
             LoadTask task;
             task.imageIndex = imageIndex;
             task.imagePath = imagePath;
-            task.loadType = LoadType::Full;
+            task.loadType = loadType;
             taskQueue_.push(std::move(task));
         }
 
@@ -244,8 +257,9 @@ private:
                 
                 if (task.loadType == LoadType::PreviewOnly) {
                     loadPreview(task, *rawProcessor);
-                } else {
-                    // Full load: load both preview and raw
+                } else if (task.loadType == LoadType::RawOnly) {
+                    loadRaw(task, *rawProcessor);
+                } else {  // LoadType::Both
                     loadPreview(task, *rawProcessor);
                     loadRaw(task, *rawProcessor);
                 }
@@ -259,6 +273,8 @@ private:
     // Initialize and open a raw file with LibRaw
     // Returns nullptr on failure
     std::unique_ptr<LibRaw> initializeRawProcessor(const std::string& imagePath) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+        
         // Allocate LibRaw on heap to avoid stack overflow
         auto rawProcessor = std::make_unique<LibRaw>();
 
@@ -276,11 +292,20 @@ private:
             return nullptr;
         }
 
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        
+        // Extract just the filename
+        fs::path path(imagePath);
+        std::cout << "Opened raw file: " << path.filename().string() << " in " << duration.count() << " ms" << std::endl;
+
         return rawProcessor;
     }
 
     // Load the preview/thumbnail for an image
     void loadPreview(const LoadTask& task, LibRaw& rawProcessor) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+        
         // Get orientation
         int orientation = rawProcessor.imgdata.sizes.flip;
 
@@ -291,10 +316,19 @@ private:
         previewResult.cpuTexture = loadJpegPreview(rawProcessor);
         previewResult.orientation = orientation;
         resultsQueue_.push(std::move(previewResult));
+        
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        
+        // Extract just the filename
+        fs::path path(task.imagePath);
+        std::cout << "Loaded preview: " << path.filename().string() << " in " << duration.count() << " ms" << std::endl;
     }
 
     // Load the full raw image
     void loadRaw(const LoadTask& task, LibRaw& rawProcessor) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+        
         // Configure processing parameters for better color accuracy
         rawProcessor.imgdata.params.use_camera_wb = 1;
         rawProcessor.imgdata.params.output_color = 1;
@@ -324,5 +358,12 @@ private:
         rawResult.rawImage = image;  // Transfer ownership
         rawResult.orientation = 0;  // Orientation is not set for raw images
         resultsQueue_.push(std::move(rawResult));
+        
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        
+        // Extract just the filename
+        fs::path path(task.imagePath);
+        std::cout << "Loaded raw: " << path.filename().string() << " in " << duration.count() << " ms" << std::endl;
     }
 };
