@@ -292,35 +292,32 @@ void clearAndRebuildDatabase(const std::string& path) {
 }
 
 int main(int argc, char* argv[]) {
-    // Check if path argument is provided
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <path>" << std::endl;
-        std::cerr << "  <path> can be a folder (to browse) or a file (to display)" << std::endl;
-        return 1;
-    }
-
     const int initialWidth = 1280;
     const int initialHeight = 800;
     if (!initializeSDL(initialWidth, initialHeight)) {
         return 1;
     }
 
-    // Load initial images from command line argument
-    std::string path = argv[1];
-    clearAndRebuildDatabase(path);
-
-    if (app.images.empty()) {
-        std::cerr << "No images loaded" << std::endl;
-        return 0;
+    // Load initial images from command line argument if provided
+    if (argc >= 2) {
+        std::string path = argv[1];
+        clearAndRebuildDatabase(path);
+    } else {
+        // No arguments - start with empty database
+        app.database = new ImageDatabase(renderer);
+        app.database->start();
+        std::cout << "No path provided - drag and drop images or folders to browse" << std::endl;
     }
 
     // Main event loop
     bool running = true;
     SDL_Event event;
 
-    std::cout << "\nControls:" << std::endl;
-    std::cout << "  Click filename in list to view image" << std::endl;
-    std::cout << "  ESC/Q - Quit" << std::endl;
+    if (!app.images.empty()) {
+        std::cout << "\nControls:" << std::endl;
+        std::cout << "  Click filename in list to view image" << std::endl;
+        std::cout << "  ESC/Q - Quit" << std::endl;
+    }
 
     while (running) {
         // Get window size early for event processing
@@ -541,68 +538,84 @@ int main(int argc, char* argv[]) {
         // Update database - processes completed loads on main thread
         app.database->update();
 
-        // Request images for the selected image
-        GpuTexture* currentPreview = app.database->tryGetThumbnail(app.currentImageIndex, app.images[app.currentImageIndex].string());
-        GpuTexture* currentRaw = app.database->tryGetRaw(app.currentImageIndex, app.images[app.currentImageIndex].string());
-
         // Clear and render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
 
-        // Determine what to display based on loading state and showPreview checkbox
-        GpuTexture* imageToDisplay = nullptr;
-        const char* loadingText = nullptr;
+        if (!app.images.empty()) {
+            // Request images for the selected image
+            GpuTexture* currentPreview = app.database->tryGetThumbnail(app.currentImageIndex, app.images[app.currentImageIndex].string());
+            GpuTexture* currentRaw = app.database->tryGetRaw(app.currentImageIndex, app.images[app.currentImageIndex].string());
 
-        if (!app.showPreview && currentRaw && currentRaw->texture) {
-            imageToDisplay = currentRaw;
-        } else if (currentPreview && currentPreview->texture) {
-            // Preview is ready but not raw, show preview with loading text
-            imageToDisplay = currentPreview;
-            if(!app.showPreview)
-            {
-                loadingText = "Loading full image...";
+            // Determine what to display based on loading state and showPreview checkbox
+            GpuTexture* imageToDisplay = nullptr;
+            const char* loadingText = nullptr;
+
+            if (!app.showPreview && currentRaw && currentRaw->texture) {
+                imageToDisplay = currentRaw;
+            } else if (currentPreview && currentPreview->texture) {
+                // Preview is ready but not raw, show preview with loading text
+                imageToDisplay = currentPreview;
+                if(!app.showPreview)
+                {
+                    loadingText = "Loading full image...";
+                }
+            } else {
+                // Nothing ready yet
+                loadingText = "Loading preview...";
+            }
+
+            // Render the image if available
+            if (imageToDisplay) {
+                // Get display dimensions (accounting for rotation)
+                app.currentImageAspect = static_cast<float>(imageToDisplay->getWidth()) /
+                                         static_cast<float>(imageToDisplay->getHeight());
+
+                // Calculate available space for image (excluding sidebar and controls bar)
+                int availableWidth = windowWidth - static_cast<int>(app.sidebarWidth);
+                int availableHeight = windowHeight - 40;  // Reserve 40px for controls
+
+                // Calculate destination rectangle to maintain aspect ratio in available space
+                SDL_FRect destRect = calculateFitRect(availableWidth, availableHeight, app.currentImageAspect);
+
+                // Apply zoom
+                float zoomedWidth = destRect.w * app.zoom;
+                float zoomedHeight = destRect.h * app.zoom;
+
+                // Center the zoomed image and apply pan
+                destRect.x = app.sidebarWidth + (availableWidth - zoomedWidth) / 2.0f + app.pan.x;
+                destRect.y = (availableHeight - zoomedHeight) / 2.0f + app.pan.y;
+                destRect.w = zoomedWidth;
+                destRect.h = zoomedHeight;
+
+                imageToDisplay->render(renderer, &destRect);
+            }
+
+            // Display loading text if needed
+            if (loadingText) {
+                ImGui::SetNextWindowPos(ImVec2(app.sidebarWidth + 10, 10));
+                ImGui::Begin("##LoadingStatus", nullptr,
+                    ImGuiWindowFlags_NoTitleBar |
+                    ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_AlwaysAutoResize |
+                    ImGuiWindowFlags_NoBackground);
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", loadingText);
+                ImGui::End();
             }
         } else {
-            // Nothing ready yet
-            loadingText = "Loading preview...";
-        }
-
-        // Render the image if available
-        if (imageToDisplay) {
-            // Get display dimensions (accounting for rotation)
-            app.currentImageAspect = static_cast<float>(imageToDisplay->getWidth()) /
-                                     static_cast<float>(imageToDisplay->getHeight());
-
-            // Calculate available space for image (excluding sidebar and controls bar)
-            int availableWidth = windowWidth - static_cast<int>(app.sidebarWidth);
-            int availableHeight = windowHeight - 40;  // Reserve 40px for controls
-
-            // Calculate destination rectangle to maintain aspect ratio in available space
-            SDL_FRect destRect = calculateFitRect(availableWidth, availableHeight, app.currentImageAspect);
-
-            // Apply zoom
-            float zoomedWidth = destRect.w * app.zoom;
-            float zoomedHeight = destRect.h * app.zoom;
-
-            // Center the zoomed image and apply pan
-            destRect.x = app.sidebarWidth + (availableWidth - zoomedWidth) / 2.0f + app.pan.x;
-            destRect.y = (availableHeight - zoomedHeight) / 2.0f + app.pan.y;
-            destRect.w = zoomedWidth;
-            destRect.h = zoomedHeight;
-
-            imageToDisplay->render(renderer, &destRect);
-        }
-
-        // Display loading text if needed
-        if (loadingText) {
-            ImGui::SetNextWindowPos(ImVec2(app.sidebarWidth + 10, 10));
-            ImGui::Begin("##LoadingStatus", nullptr,
+            // No images loaded - show welcome message
+            ImGui::SetNextWindowPos(ImVec2(static_cast<float>(windowWidth) / 2.0f, static_cast<float>(windowHeight) / 2.0f), 
+                                    ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::Begin("##WelcomeMessage", nullptr,
                 ImGuiWindowFlags_NoTitleBar |
                 ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove |
                 ImGuiWindowFlags_AlwaysAutoResize |
                 ImGuiWindowFlags_NoBackground);
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", loadingText);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+            ImGui::Text("Drag and drop an image or folder of images to browse");
+            ImGui::PopStyleColor();
             ImGui::End();
         }
 
