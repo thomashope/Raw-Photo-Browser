@@ -33,6 +33,9 @@ struct App
     bool showPreview = false;
     float sidebarWidth = 250.0f;  // Current sidebar width
     float currentImageAspect = 1.0f;  // Aspect ratio of current image
+    
+    // Filter state
+    char filterText[256] = "";  // ImGui text input buffer
 };
 
 namespace
@@ -420,6 +423,18 @@ int main(int argc, char* argv[]) {
 
         app.sidebarWidth = ImGui::GetWindowWidth();
 
+        // Filter text box at the top (always visible)
+        ImGui::SetNextItemWidth(-1);  // Full width
+        ImGui::InputTextWithHint("##filter", "Filter...", app.filterText, sizeof(app.filterText));
+        
+        // Convert filter text to lowercase for case-insensitive comparison
+        std::string filterLower = app.filterText;
+        std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(),
+                      [](unsigned char c){ return std::tolower(c); });
+
+        // Begin scrollable child window for the image list
+        ImGui::BeginChild("##ImageList", ImVec2(0, 0), false);
+
         const float thumbnailHeight = 64.0f;  // Fixed thumbnail height
         const float textHeight = ImGui::GetTextLineHeight();
         const float itemHeight = thumbnailHeight + textHeight + 4.0f;  // Thumbnail + text + padding
@@ -428,6 +443,16 @@ int main(int argc, char* argv[]) {
         {
             // Get just the filename from the full path
             std::string filename = app.images[i].filename().string();
+
+            // Filter by filename (case-insensitive)
+            if (!filterLower.empty()) {
+                std::string filenameLower = filename;
+                std::transform(filenameLower.begin(), filenameLower.end(), filenameLower.begin(),
+                              [](unsigned char c){ return std::tolower(c); });
+                if (filenameLower.find(filterLower) == std::string::npos) {
+                    continue;  // Skip this image if it doesn't match the filter
+                }
+            }
 
             ImGui::PushID(static_cast<int>(i));
 
@@ -533,6 +558,7 @@ int main(int argc, char* argv[]) {
 
             ImGui::PopID();
         }
+        ImGui::EndChild();  // End scrollable image list
         ImGui::End();
 
         // Update database - processes completed loads on main thread
