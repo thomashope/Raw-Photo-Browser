@@ -252,7 +252,7 @@ int addImagesInDirectory(const std::string& folderPath) {
 
 void clearAndRebuildDatabase(const std::string& path) {
     std::error_code ec;
-    
+
     // Validate path exists
     if (!fs::exists(path, ec)) {
         std::cerr << "Error: Path does not exist: " << path << std::endl;
@@ -261,13 +261,13 @@ void clearAndRebuildDatabase(const std::string& path) {
         }
         return;
     }
-    
+
     // Clear existing data
     app.images.clear();
     app.currentImageIndex = 0;
     app.zoom = 1.0f;
     app.pan = {0.0f, 0.0f};
-    
+
     // Recreate the database (this clears all cached data)
     // If database doesn't exist yet (startup), create it
     if (app.database) {
@@ -275,7 +275,7 @@ void clearAndRebuildDatabase(const std::string& path) {
     }
     app.database = new ImageDatabase(renderer);
     app.database->start();
-    
+
     // Rebuild image list
     if (fs::is_directory(path, ec)) {
         addImagesInDirectory(path);
@@ -471,11 +471,59 @@ int main(int argc, char* argv[]) {
                 ImVec2 thumbnailMin = selectableMin;
                 ImVec2 thumbnailMax = ImVec2(selectableMin.x + thumbnailWidth, selectableMin.y + thumbnailHeight);
 
-                ImGui::GetWindowDrawList()->AddImage(
-                    (ImTextureID)(intptr_t)thumbnail->texture,
-                    thumbnailMin,
-                    thumbnailMax
-                );
+                // For 90° rotations, we need to use AddImageQuad instead of AddImage
+                // because AddImage only takes 2 UV corners which can't properly rotate
+                // LibRaw flip values: 0=none, 3=180°, 5=90°CCW+flip, 6=90°CW
+                
+                if (thumbnail->orientation == 5 || thumbnail->orientation == 6) {
+                    // Use AddImageQuad for 90° rotations
+                    // Define the 4 corners: top-left, top-right, bottom-right, bottom-left
+                    ImVec2 p1 = thumbnailMin;  // top-left
+                    ImVec2 p2 = ImVec2(thumbnailMax.x, thumbnailMin.y);  // top-right
+                    ImVec2 p3 = thumbnailMax;  // bottom-right
+                    ImVec2 p4 = ImVec2(thumbnailMin.x, thumbnailMax.y);  // bottom-left
+                    
+                    ImVec2 uv1, uv2, uv3, uv4;
+                    if (thumbnail->orientation == 6) {
+                        // 90° CW: rotate UV coordinates clockwise
+                        uv1 = ImVec2(0, 1);  // top-left gets bottom-left of texture
+                        uv2 = ImVec2(0, 0);  // top-right gets top-left of texture
+                        uv3 = ImVec2(1, 0);  // bottom-right gets top-right of texture
+                        uv4 = ImVec2(1, 1);  // bottom-left gets bottom-right of texture
+                    } else {  // orientation == 5
+                        // 90° CCW + flip
+                        uv1 = ImVec2(1, 0);  // top-left gets top-right of texture
+                        uv2 = ImVec2(1, 1);  // top-right gets bottom-right of texture
+                        uv3 = ImVec2(0, 1);  // bottom-right gets bottom-left of texture
+                        uv4 = ImVec2(0, 0);  // bottom-left gets top-left of texture
+                    }
+                    
+                    ImGui::GetWindowDrawList()->AddImageQuad(
+                        (ImTextureID)(intptr_t)thumbnail->texture,
+                        p1, p2, p3, p4,
+                        uv1, uv2, uv3, uv4
+                    );
+                } else {
+                    // Use AddImage for 0° and 180° rotations (works fine with 2 UV corners)
+                    ImVec2 uv_min, uv_max;
+                    if (thumbnail->orientation == 3) {
+                        // 180° rotation
+                        uv_min = ImVec2(1, 1);
+                        uv_max = ImVec2(0, 0);
+                    } else {
+                        // No rotation
+                        uv_min = ImVec2(0, 0);
+                        uv_max = ImVec2(1, 1);
+                    }
+                    
+                    ImGui::GetWindowDrawList()->AddImage(
+                        (ImTextureID)(intptr_t)thumbnail->texture,
+                        thumbnailMin,
+                        thumbnailMax,
+                        uv_min,
+                        uv_max
+                    );
+                }
 
                 // Draw filename below thumbnail
                 ImVec2 textPos = ImVec2(selectableMin.x, selectableMin.y + thumbnailHeight + 2.0f);
