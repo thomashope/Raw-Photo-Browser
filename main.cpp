@@ -16,6 +16,8 @@
 
 namespace fs = std::filesystem;
 
+struct Vec2 { float x, y; };
+
 struct App
 {
     std::vector<fs::path> images;
@@ -25,11 +27,9 @@ struct App
 
     // Zoom and pan state
     float zoom = 1.0f;
-    float panX = 0.0f;
-    float panY = 0.0f;
+    Vec2 pan = {0.0f, 0.0f};
     bool isPanning = false;
-    float lastMouseX = 0.0f;
-    float lastMouseY = 0.0f;
+    Vec2 lastMouse = {0.0f, 0.0f};
     bool showPreview = false;
     float sidebarWidth = 250.0f;  // Current sidebar width
     float currentImageAspect = 1.0f;  // Aspect ratio of current image
@@ -104,9 +104,8 @@ SDL_FRect calculateFitRect(int windowWidth, int windowHeight, float imageAspect)
 
 // Convert pixel coordinates to UV coordinates (0-1 range in the image)
 // Takes into account viewport size, zoom, and pan
-struct Vec2 { float x, y; };
-Vec2 pixelToUv(float pixelX, float pixelY, float viewportWidth, float viewportHeight,
-               float imageAspect, float zoom, float panX, float panY) {
+Vec2 pixelToUv(Vec2 pixel, float viewportWidth, float viewportHeight,
+               float imageAspect, float zoom, Vec2 pan) {
     // Calculate the base fit rect (at zoom 1.0, pan 0)
     SDL_FRect fitRect = calculateFitRect(viewportWidth, viewportHeight, imageAspect);
 
@@ -115,20 +114,20 @@ Vec2 pixelToUv(float pixelX, float pixelY, float viewportWidth, float viewportHe
     float imageHeight = fitRect.h * zoom;
 
     // Calculate image top-left position with pan
-    float imageX = (viewportWidth - imageWidth) / 2.0f + panX;
-    float imageY = (viewportHeight - imageHeight) / 2.0f + panY;
+    float imageX = (viewportWidth - imageWidth) / 2.0f + pan.x;
+    float imageY = (viewportHeight - imageHeight) / 2.0f + pan.y;
 
     // Convert pixel to UV (0-1 range)
     Vec2 uv;
-    uv.x = (pixelX - imageX) / imageWidth;
-    uv.y = (pixelY - imageY) / imageHeight;
+    uv.x = (pixel.x - imageX) / imageWidth;
+    uv.y = (pixel.y - imageY) / imageHeight;
     return uv;
 }
 
 // Convert UV coordinates (0-1 range in the image) to pixel coordinates
 // Takes into account viewport size, zoom, and pan
-Vec2 uvToPixel(float uvX, float uvY, float viewportWidth, float viewportHeight,
-               float imageAspect, float zoom, float panX, float panY) {
+Vec2 uvToPixel(Vec2 uv, float viewportWidth, float viewportHeight,
+               float imageAspect, float zoom, Vec2 pan) {
     // Calculate the base fit rect (at zoom 1.0, pan 0)
     SDL_FRect fitRect = calculateFitRect(viewportWidth, viewportHeight, imageAspect);
 
@@ -137,13 +136,13 @@ Vec2 uvToPixel(float uvX, float uvY, float viewportWidth, float viewportHeight,
     float imageHeight = fitRect.h * zoom;
 
     // Calculate image top-left position with pan
-    float imageX = (viewportWidth - imageWidth) / 2.0f + panX;
-    float imageY = (viewportHeight - imageHeight) / 2.0f + panY;
+    float imageX = (viewportWidth - imageWidth) / 2.0f + pan.x;
+    float imageY = (viewportHeight - imageHeight) / 2.0f + pan.y;
 
     // Convert UV to pixel
     Vec2 pixel;
-    pixel.x = imageX + uvX * imageWidth;
-    pixel.y = imageY + uvY * imageHeight;
+    pixel.x = imageX + uv.x * imageWidth;
+    pixel.y = imageY + uv.y * imageHeight;
     return pixel;
 }
 
@@ -251,6 +250,47 @@ int addImagesInDirectory(const std::string& folderPath) {
     return 0;
 }
 
+void clearAndRebuildDatabase(const std::string& path) {
+    std::error_code ec;
+    
+    // Validate path exists
+    if (!fs::exists(path, ec)) {
+        std::cerr << "Error: Path does not exist: " << path << std::endl;
+        if (ec) {
+            std::cerr << "Error code: " << ec.message() << std::endl;
+        }
+        return;
+    }
+    
+    // Clear existing data
+    app.images.clear();
+    app.currentImageIndex = 0;
+    app.zoom = 1.0f;
+    app.pan = {0.0f, 0.0f};
+    
+    // Recreate the database (this clears all cached data)
+    // If database doesn't exist yet (startup), create it
+    if (app.database) {
+        delete app.database;
+    }
+    app.database = new ImageDatabase(renderer);
+    app.database->start();
+    
+    // Rebuild image list
+    if (fs::is_directory(path, ec)) {
+        addImagesInDirectory(path);
+    } else if (fs::is_regular_file(path, ec)) {
+        if (isRawFileExtension(path)) {
+            app.images.push_back(path);
+            std::cout << "Loaded single file: " << path << std::endl;
+        } else {
+            std::cerr << "Error: File is not a supported raw image format" << std::endl;
+        }
+    } else {
+        std::cerr << "Error: Path is neither a file nor a directory: " << path << std::endl;
+    }
+}
+
 int main(int argc, char* argv[]) {
     // Check if path argument is provided
     if (argc != 2) {
@@ -259,42 +299,20 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string path = argv[1];
-
-    // Check if the path exists
-    std::error_code ec;
-
-    if (!fs::exists(path, ec)) {
-        std::cerr << "Error: Path does not exist: " << path << std::endl;
-        if (ec) {
-            std::cerr << "Error code: " << ec.message() << std::endl;
-        }
-        return 1;
-    }
-
-    // Determine if path is a file or directory
-    if (fs::is_directory(path, ec)) {
-        addImagesInDirectory(path);
-    } else if (fs::is_regular_file(path, ec)) {
-        if (isRawFileExtension(path))
-            app.images.push_back(path);
-    } else {
-        std::cerr << "Error: Path is neither a file nor a directory: " << path << std::endl;
-        return 1;
-    }
-
-    if (app.images.empty())
-        return 0;
-
     const int initialWidth = 1280;
     const int initialHeight = 800;
     if (!initializeSDL(initialWidth, initialHeight)) {
         return 1;
     }
 
-    // Initialize database and start worker threads
-    app.database = new ImageDatabase(renderer);
-    app.database->start();
+    // Load initial images from command line argument
+    std::string path = argv[1];
+    clearAndRebuildDatabase(path);
+
+    if (app.images.empty()) {
+        std::cerr << "No images loaded" << std::endl;
+        return 0;
+    }
 
     // Main event loop
     bool running = true;
@@ -326,6 +344,13 @@ int main(int argc, char* argv[]) {
 
             if (event.type == SDL_EVENT_QUIT) {
                 running = false;
+            } else if (event.type == SDL_EVENT_DROP_FILE) {
+                // Handle file/folder drop
+                if (event.drop.data) {
+                    std::string droppedPath = event.drop.data;
+                    std::cout << "File/folder dropped: " << droppedPath << std::endl;
+                    clearAndRebuildDatabase(droppedPath);
+                }
             } else if (event.type == SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_Q) {
                     running = false;
@@ -338,12 +363,11 @@ int main(int argc, char* argv[]) {
                 SDL_GetMouseState(&mouseX, &mouseY);
 
                 // Convert mouse to viewport coordinates (relative to image area)
-                float mouseViewportX = mouseX - app.sidebarWidth;
-                float mouseViewportY = mouseY;
+                Vec2 mouseViewport = {mouseX - app.sidebarWidth, mouseY};
 
                 // Get UV coordinates at mouse position with old zoom
-                Vec2 uv = pixelToUv(mouseViewportX, mouseViewportY, viewportWidth, viewportHeight,
-                                   app.currentImageAspect, app.zoom, app.panX, app.panY);
+                Vec2 uv = pixelToUv(mouseViewport, viewportWidth, viewportHeight,
+                                   app.currentImageAspect, app.zoom, app.pan);
 
                 // Apply zoom
                 float oldZoom = app.zoom;
@@ -360,18 +384,17 @@ int main(int argc, char* argv[]) {
 
                 if (app.zoom != oldZoom) {
                     // Get pixel position where that UV coordinate would be with new zoom
-                    Vec2 newPixel = uvToPixel(uv.x, uv.y, viewportWidth, viewportHeight,
-                                             app.currentImageAspect, app.zoom, app.panX, app.panY);
+                    Vec2 newPixel = uvToPixel(uv, viewportWidth, viewportHeight,
+                                             app.currentImageAspect, app.zoom, app.pan);
 
                     // Adjust pan by the difference to keep mouse over same UV point
-                    app.panX += mouseViewportX - newPixel.x;
-                    app.panY += mouseViewportY - newPixel.y;
+                    app.pan.x += mouseViewport.x - newPixel.x;
+                    app.pan.y += mouseViewport.y - newPixel.y;
                 }
             } else if (!imgui_wants_mouse && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     app.isPanning = true;
-                    app.lastMouseX = event.button.x;
-                    app.lastMouseY = event.button.y;
+                    app.lastMouse = {event.button.x, event.button.y};
                 }
             } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 if (event.button.button == SDL_BUTTON_LEFT) {
@@ -379,10 +402,9 @@ int main(int argc, char* argv[]) {
                 }
             } else if (!imgui_wants_mouse && event.type == SDL_EVENT_MOUSE_MOTION) {
                 if (app.isPanning) {
-                    app.panX += event.motion.x - app.lastMouseX;
-                    app.panY += event.motion.y - app.lastMouseY;
-                    app.lastMouseX = event.motion.x;
-                    app.lastMouseY = event.motion.y;
+                    app.pan.x += event.motion.x - app.lastMouse.x;
+                    app.pan.y += event.motion.y - app.lastMouse.y;
+                    app.lastMouse = {event.motion.x, event.motion.y};
                 }
             }
         }
@@ -421,8 +443,7 @@ int main(int argc, char* argv[]) {
                 app.currentImageIndex = i;
                 // Reset zoom and pan when changing images
                 app.zoom = 1.0f;
-                app.panX = 0.0f;
-                app.panY = 0.0f;
+                app.pan = {0.0f, 0.0f};
             }
 
             // Check if this item is visible in the scroll region
@@ -516,8 +537,8 @@ int main(int argc, char* argv[]) {
             float zoomedHeight = destRect.h * app.zoom;
 
             // Center the zoomed image and apply pan
-            destRect.x = app.sidebarWidth + (availableWidth - zoomedWidth) / 2.0f + app.panX;
-            destRect.y = (availableHeight - zoomedHeight) / 2.0f + app.panY;
+            destRect.x = app.sidebarWidth + (availableWidth - zoomedWidth) / 2.0f + app.pan.x;
+            destRect.y = (availableHeight - zoomedHeight) / 2.0f + app.pan.y;
             destRect.w = zoomedWidth;
             destRect.h = zoomedHeight;
 
@@ -550,8 +571,7 @@ int main(int argc, char* argv[]) {
         ImGui::SameLine();
         if (ImGui::Button("Reset Zoom")) {
             app.zoom = 1.0f;
-            app.panX = 0.0f;
-            app.panY = 0.0f;
+            app.pan = {0.0f, 0.0f};
         }
         ImGui::SameLine();
         ImGui::Text("Zoom: %.1fx", app.zoom);
